@@ -1,0 +1,7 @@
+# креды и состояние — только локально, в репозиторий не попадают
+client_secret*.json
+.stream_state.json
+.env
+
+__pycache__/
+*.pyc

@@ -1,0 +1,70 @@
+name: YouTube Live
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Длительность эфира в минутах. Лимит job'а — 360, поэтому по умолчанию 348 (запас на установку и корректное закрытие)."
+        required: false
+        default: "348"
+      title:
+        description: "Заголовок эфира (пусто = сгенерируется автоматически)"
+        required: false
+        default: ""
+      privacy:
+        description: "Видимость: public | unlisted | private"
+        required: false
+        default: "public"
+
+permissions:
+  contents: read
+
+# Два одновременных эфира с одного канала — это гарантированный сбой,
+# поэтому параллельные запуски не отменяем, а ставим в очередь.
+concurrency:
+  group: youtube-live
+  cancel-in-progress: false
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    # Жёсткий потолок GitHub-hosted раннера. Выше поставить нельзя.
+    timeout-minutes: 360
+
+    env:
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Эфир
+        run: |
+          python scripts/start_stream.py \
+            --minutes "${{ inputs.minutes }}" \
+            --title "${{ inputs.title }}" \
+            --privacy "${{ inputs.privacy }}"
+
+      # Сработает, если шаг выше упал или был отменён кнопкой.
+      # При ЖЁСТКОМ таймауте job'а (360 мин) GitHub убивает процесс и этот шаг
+      # не выполнится — там трансляцию закрывает сам YouTube, потому что
+      # broadcast создаётся с enableAutoStop=true.
+      - name: Закрыть трансляцию, если что-то пошло не так
+        if: always()
+        run: python scripts/start_stream.py --stop
