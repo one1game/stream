@@ -1,4 +1,1 @@
-google-api-python-client>=2.120
-google-auth>=2.30
-google-auth-oauthlib>=1.2
 numpy>=1.26
