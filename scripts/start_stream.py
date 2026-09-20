@@ -52,10 +52,11 @@ def source_command(seed: int) -> list[str]:
 def ffmpeg_command(stream_key: str, seconds: int, video_port: int, audio_port: int) -> list[str]:
     return [
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning",
-        # Оба входа идут по localhost: у FFmpeg только один stdin, а источник
-        # должен отдавать два потока одновременно. -re не нужен — источник сам
-        # держит реальное время, поэтому FFmpeg читает ровно в темпе эфира.
-        "-f", "rawvideo", "-pix_fmt", "rgba",
+        # Оба входа идут по localhost. -re на видео обязателен: без него FFmpeg
+        # шлёт кадры с временными метками быстрее реального времени, и YouTube
+        # отбрасывает такой поток, не показывая эфир. Аудио FFmpeg сам тянет
+        # в темпе видео.
+        "-re", "-f", "rawvideo", "-pix_fmt", "rgba",
         "-s", f"{WIDTH}x{HEIGHT}", "-r", str(FPS),
         "-i", f"tcp://127.0.0.1:{video_port}",
         "-f", "f32le", "-ar", "44100", "-ac", "2",
