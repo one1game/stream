@@ -51,7 +51,10 @@ def source_command(seed: int) -> list[str]:
 
 def ffmpeg_command(stream_key: str, seconds: int, video_port: int, audio_port: int) -> list[str]:
     return [
-        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning",
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info",
+        # Не даём FFmpeg виснуть вечно на RTMP/tcp: через 20 с без I/O он
+        # сам упадёт и оставит в логе причину, а не молча зависнет.
+        "-rw_timeout", "20000000",
         # Оба входа идут по localhost. -re на видео обязателен: без него FFmpeg
         # шлёт кадры с временными метками быстрее реального времени, и YouTube
         # отбрасывает такой поток, не показывая эфир. Аудио FFmpeg сам тянет
