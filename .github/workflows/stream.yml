@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: "Длительность эфира в минутах. Лимит job'а — 360, поэтому по умолчанию 348 (запас на установку зависимостей)."
+        description: "Длительность эфира в минутах. Лимит job'а — 360, скрипт сам обрежет эфир до 355 минут от старта job'а (запас на остановку и закрытие RTMP), поэтому по умолчанию 348."
         required: false
         default: "348"
       quality:
@@ -50,8 +50,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends ffmpeg
           ffmpeg -version | head -n 1
 
+      # Запоминаем старт job'а: от него скрипт считает жёсткий предел в 355 мин,
+      # чтобы установка зависимостей не съедала запас до лимита GitHub в 360 мин.
+      - name: Запомнить начало job'а
+        run: echo "JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Эфир
         run: |
           python scripts/start_stream.py \
             --minutes "${{ inputs.minutes }}" \
-            --quality "${{ inputs.quality }}"
+            --quality "${{ inputs.quality }}" \
+            --started-at "${JOB_STARTED_AT:-}"

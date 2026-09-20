@@ -14,6 +14,7 @@ import argparse
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -41,8 +42,16 @@ VIDEO_BITRATE = "3000k"
 
 # GitHub-hosted job живёт максимум 360 минут, выше не поднять.
 MAX_MINUTES = 350
+# Жёсткий предел считается от старта job'а: установка зависимостей и закрытие
+# RTMP тоже занимают время, и в 360 минут они входить не должны.
+JOB_LIMIT_MINUTES = 355
 MAX_RETRIES = 5
 READY_TIMEOUT = 60
+
+# Сюда складываем запущенные процессы, чтобы обработчик сигнала мог их
+# остановить: GitHub при отмене шлёт SIGTERM, и лучше закрыть RTMP самим.
+running: dict[str, subprocess.Popen | None] = {"encoder": None, "source": None}
+stopping = threading.Event()
 
 
 def log(message: str) -> None:
@@ -137,14 +146,34 @@ def attempt(
         ffmpeg_command(stream_key, seconds, video_port, audio_port, src, out),
         stdin=subprocess.DEVNULL, cwd=str(ROOT),
     )
-    returncode = encoder.wait()
-    if source.poll() is None:
-        source.terminate()
-        try:
-            source.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            source.kill()
-    return returncode
+    running["encoder"] = encoder
+    try:
+        while True:
+            try:
+                return encoder.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                if stopping.is_set():
+                    # SIGTERM, а не SIGKILL: FFmpeg дописывает поток и сам
+                    # закрывает RTMP-соединение, по обрыву YouTube завершает
+                    # трансляцию (Auto-stop в Studio).
+                    log("Останавливаю FFmpeg — закрываю RTMP, дальше YouTube сам "
+                        "завершит трансляцию по автостопу.")
+                    encoder.terminate()
+                    try:
+                        encoder.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        log("FFmpeg не ответил на SIGTERM, снимаю принудительно.")
+                        encoder.kill()
+                        encoder.wait(timeout=10)
+                    return encoder.returncode or 0
+    finally:
+        running["encoder"] = None
+        if source.poll() is None:
+            source.terminate()
+            try:
+                source.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                source.kill()
 
 
 def run(
@@ -152,7 +181,7 @@ def run(
     src: tuple[int, int, int], out: tuple[int, int, int],
 ) -> bool:
     tries = 0
-    while True:
+    while not stopping.is_set():
         remaining = int(deadline - time.time())
         if remaining <= 30:
             return True
@@ -171,6 +200,12 @@ def run(
             return True
         log(f"FFmpeg упал с кодом {code}, переподключаюсь.")
         time.sleep(5)
+    return True
+
+
+def handle_signal(signum: int, _frame: object) -> None:
+    stopping.set()
+    log(f"Пришёл сигнал {signum} — сворачиваю эфир.")
 
 
 def main() -> int:
@@ -185,6 +220,10 @@ def main() -> int:
         choices=sorted(QUALITY),
         help="light — 960x540, normal — 1280x720, high — 1920x1080",
     )
+    parser.add_argument(
+        "--started-at", default=os.environ.get("JOB_STARTED_AT", ""),
+        help="epoch-время старта job'а: по нему считается жёсткий предел в 355 мин",
+    )
     args = parser.parse_args()
 
     if not args.key:
@@ -194,13 +233,34 @@ def main() -> int:
 
     src, out = QUALITY[args.quality]
     minutes = max(1, min(args.minutes, MAX_MINUTES))
+    # Если GitHub отменяет job, приходит SIGTERM: закрываем RTMP сами и
+    # оставляем в логе причину, вместо того чтобы оборвать соединение насильно.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, handle_signal)
+        except (ValueError, OSError):       # не на всех платформах есть
+            pass
     # Маскируем ключ в логах Actions на случай, если он куда-то попадёт.
     print(f"::add-mask::{args.key}", flush=True)
     log(f"Эфир на {minutes} мин. Режим {args.quality}: "
         f"источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}.")
 
-    deadline = time.time() + minutes * 60
-    return 0 if run(args.key, deadline, src, out) else 1
+    started = time.time()
+    if args.started_at:
+        try:
+            started = float(args.started_at)
+        except ValueError:
+            log(f"Не понял старт job'а {args.started_at!r}, считаю от себя.")
+    hard_stop = started + JOB_LIMIT_MINUTES * 60
+    deadline = min(time.time() + minutes * 60, hard_stop)
+    log(f"Конец эфира в {datetime.fromtimestamp(deadline, timezone.utc):%H:%M:%S} UTC "
+        f"(жёсткий предел job'а — {JOB_LIMIT_MINUTES} мин от старта). "
+        "После этого FFmpeg закроет RTMP, и YouTube завершит трансляцию сам, "
+        "если в Studio включён автостоп.")
+
+    ok = run(args.key, deadline, src, out)
+    log("RTMP закрыт. Трансляция на YouTube завершается по автостопу.")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
