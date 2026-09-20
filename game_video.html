@@ -164,7 +164,7 @@ const GLYPHS = {
 function text(str, x, y, color, scale, spacing) {
   const sp = spacing === undefined ? 1 : spacing;
   let cx = x;
-  g.fillStyle = color;
+  paint(color);
   for (const ch of str.toUpperCase()) {
     const rows = GLYPHS[ch];
     if (rows) {
@@ -189,7 +189,13 @@ function textCentered(str, y, color, scale) {
 }
 
 // ---------------------------------------------------------------- мелочи
-const rect = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(x | 0, y | 0, w | 0, h | 0); };
+// Присваивание fillStyle обходится дороже самого fillRect (разбор строки
+// цвета), а цветов за кадр мы считаем тысячи. Поэтому помним последний
+// выставленный цвет и не трогаем контекст, если он тот же.
+let fillKey = null;
+function paint(c) { if (c !== fillKey) { g.fillStyle = c; fillKey = c; } }
+const resetPaint = () => { fillKey = null; };   // после save/restore состояние контекста меняется
+const rect = (x, y, w, h, c) => { paint(c); g.fillRect(x | 0, y | 0, w | 0, h | 0); };
 function bandGradient(y0, y1, colors) {         // небо полосами с дизерингом
   const steps = colors.length - 1;
   const h = Math.max(1, Math.round((y1 - y0) / steps));
@@ -200,12 +206,12 @@ function bandGradient(y0, y1, colors) {         // небо полосами с 
     for (let d = 0; d < 3; d++) {
       const yy = y + h - 3 + d;
       if (yy >= y1) break;
-      for (let x = (d * 2) % 3; x < VW; x += 3) rect(x, yy, 1, 1, rgb(colors[i + 1] || colors[i]));
+      ditherFill(0, yy, VW, 1, rgb(colors[i + 1] || colors[i]), d & 1);
     }
   }
 }
 function silhouette(seed, baseY, amp, freq, color, step) {
-  g.fillStyle = color;
+  paint(color);
   g.beginPath();
   g.moveTo(0, VH);
   const st = step || 2;
@@ -217,15 +223,29 @@ function silhouette(seed, baseY, amp, freq, color, step) {
   g.closePath();
   g.fill();
 }
-function ditherFill(x, y, w, h, c, parity) {
-  g.fillStyle = c;
-  for (let yy = y; yy < y + h; yy++) {
-    for (let xx = x + ((yy + parity) % 2); xx < x + w; xx += 2) g.fillRect(xx, yy, 1, 1);
+// Дизеринг одной заливкой. Раньше на каждую «дырку» шёл отдельный fillRect —
+// это самый дорогой вызов в кадре (и заливка давала больше половины времени).
+// Теперь на каждый цвет держим узор 2x2 и заливаем область целиком.
+const ditherPatterns = new Map();
+function ditherPattern(c) {
+  let p = ditherPatterns.get(c);
+  if (!p) {
+    const tile = document.createElement('canvas');
+    tile.width = 2; tile.height = 2;
+    const tg = tile.getContext('2d');
+    tg.fillStyle = c;
+    tg.fillRect(0, 0, 1, 1);
+    p = g.createPattern(tile, 'repeat');
+    ditherPatterns.set(c, p);
   }
+  return p;
+}
+function ditherFill(x, y, w, h, c, parity) {
+  paint(ditherPattern(c));
+  g.fillRect((x | 0) + (parity ? 1 : 0), y | 0, w | 0, h | 0);
 }
 function glow(x, y, r, color, alpha) {
   g.globalAlpha = alpha;
-  g.fillStyle = color;
   ditherFill(x - r, y - r, r * 2, r * 2, color, 0);
   g.globalAlpha = 1;
 }
@@ -296,6 +316,22 @@ const SPRITES = {
   birdB: [
     '.aaa.',
     'a...a',
+  ],
+  camelA: [
+    '.....aa...',
+    '....aaaa..',
+    '..aaaaaa..',
+    '.aaaaaaaa.',
+    '.aa.a..aa.',
+    '.a..a...a.',
+  ],
+  camelB: [
+    '.....aa...',
+    '....aaaa..',
+    '..aaaaaa..',
+    '.aaaaaaaa.',
+    '..a.a.a.a.',
+    '.a...a..a.',
   ],
 };
 function sprite(art, x, y, map, flip, scale) {
@@ -379,6 +415,12 @@ const GENRES = {
   duel:       { label: 'FIGHTING', tint: [150, 106, 96], accent: [212, 132, 78], objective: 'WIN THE ROUND' },
   dragon:     { label: 'ACTION ADVENTURE', tint: [122, 92, 110], accent: [200, 96, 88], objective: 'SLAY THE WYRM' },
   island:     { label: 'ADVENTURE', tint: [110, 130, 132], accent: [104, 180, 150], objective: 'REACH THE SHORE' },
+  train:      { label: 'SLICE OF LIFE', tint: [132, 114, 96], accent: [198, 148, 92], objective: 'RIDE IT OUT' },
+  desert:     { label: 'SURVIVAL', tint: [152, 128, 92], accent: [218, 158, 74], objective: 'FIND THE WELL' },
+  ruins:      { label: 'EXPLORATION', tint: [110, 122, 100], accent: [150, 190, 116], objective: 'READ THE WALLS' },
+  lighthouse: { label: 'NIGHT WATCH', tint: [96, 112, 134], accent: [238, 198, 120], objective: 'KEEP THE LAMP LIT' },
+  subway:     { label: 'URBAN DRAMA', tint: [118, 114, 128], accent: [196, 154, 96], objective: 'WAIT FOR THE TRAIN' },
+  observatory: { label: 'SCIENCE', tint: [96, 104, 140], accent: [140, 170, 228], objective: 'LOG THE SKY' },
 };
 const GENRE_KEYS = Object.keys(GENRES);
 
@@ -404,7 +446,7 @@ function drawPlatformer(s, P, t) {
   }
   for (const l of s.layers) {
     const off = t * l.speed;
-    g.fillStyle = rgb(l.color);
+    paint(rgb(l.color));
     g.beginPath();
     g.moveTo(0, VH);
     for (let x = 0; x <= VW; x += 2) {
@@ -449,9 +491,8 @@ function buildRpg(r, P) {
 }
 function drawRpg(s, P, t) {
   rect(0, 0, VW, VH, rgb(mix(P.sky[1], P.ink, 0.45)));
-  for (let y = 30; y < VH; y += 3) {
-    for (let x = (y % 6 === 0 ? 0 : 1); x < VW; x += 3) rect(x, y, 1, 1, rgb(mix(P.sky[1], P.ink, 0.32)));
-  }
+  const dirt = rgb(mix(P.sky[1], P.ink, 0.32));      // трава в крапинку
+  for (let y = 30; y < VH; y += 5) ditherFill(0, y, VW, 1, dirt, (y / 5) & 1);
   const roadY = 122;
   ditherFill(0, roadY - 5, VW, 14, rgb(mix(P.sky[2], P.ink, 0.25)), 0);
   rect(0, roadY - 1, VW, 1, rgb(mix(P.sky[2], P.ink, 0.12)));
@@ -462,7 +503,7 @@ function drawRpg(s, P, t) {
   }
   for (const h of s.houses) {
     rect(h.x, h.y + 4, h.w, h.h, rgb(mix(P.sky[1], P.ink, 0.55)));
-    g.fillStyle = rgb(h.roof);
+    paint(rgb(h.roof));
     g.beginPath();
     g.moveTo(h.x - 2, h.y + 6);
     g.lineTo(h.x + h.w / 2, h.y - 4);
@@ -614,7 +655,7 @@ function drawCyber(s, P, t) {
     const x = ((b.x - t * 4) % (VW + 40) + VW + 40) % (VW + 40) - 20;
     rect(x, b.base - b.h, b.w, b.h, rgb(mix(P.ink, P.sky[1], 0.3)));
   }
-  g.restore();
+  g.restore(); resetPaint();
   g.globalAlpha = 1;
   for (const sg of s.signs) {
     const x = ((sg.x - t * 4) % (VW + 30) + VW + 30) % (VW + 30) - 15;
@@ -632,7 +673,7 @@ function drawCyber(s, P, t) {
   }
   if (Math.random() < 0.0016) s.lightning.t = t;
   if (t - s.lightning.t < 0.12) {
-    g.globalAlpha = 0.5; g.fillStyle = rgb(mix(P.sky[2], [255, 255, 255], 0.4));
+    g.globalAlpha = 0.5; paint(rgb(mix(P.sky[2], [255, 255, 255], 0.4)));
     g.fillRect(0, 0, VW, 120); g.globalAlpha = 1;
   }
 }
@@ -706,7 +747,7 @@ function drawUnderwater(s, P, t) {
       rect(x - w / 2 + Math.sin(y * 0.05 + t) * 3, y, w, 1, rgb(mix(P.glow, P.sun, 0.4)));
     }
   }
-  g.restore();
+  g.restore(); resetPaint();
   for (const w of s.weed) {
     for (let y = 0; y < w.h; y++) {
       const sway = Math.sin(t * 1.1 + w.p + y * 0.09) * (y / w.h) * 7;
@@ -799,7 +840,7 @@ function drawSnow(s, P, t) {
     const c = rgb(mix(P.ink, P.sky[2], 0.3));
     for (let i = 0; i < 3; i++) {
       const w = 11 - i * 3, y = tr.y - tr.h + i * (tr.h / 3.4);
-      g.fillStyle = c;
+      paint(c);
       g.beginPath();
       g.moveTo(tr.x, y);
       g.lineTo(tr.x - w / 2, y + tr.h / 2.6);
@@ -811,7 +852,7 @@ function drawSnow(s, P, t) {
   }
   const cb = s.cabin;
   rect(cb.x, cb.y, 40, 22, rgb(mix(P.sky[1], P.ink, 0.45)));
-  g.fillStyle = rgb(mix(P.ink, P.sky[2], 0.4));
+  paint(rgb(mix(P.ink, P.sky[2], 0.4)));
   g.beginPath();
   g.moveTo(cb.x - 4, cb.y + 1); g.lineTo(cb.x + 20, cb.y - 12); g.lineTo(cb.x + 44, cb.y + 1);
   g.closePath(); g.fill();
@@ -863,10 +904,10 @@ function drawAbstract(s, P, t) {
     const x = sh.x + Math.cos(sh.a) * 12, y = sh.y + Math.sin(sh.a * 1.3) * 8;
     const c = rgba(mix(P.accent, P.glow, (Math.sin(t * 0.5 + sh.p) + 1) / 2), 0.5);
     if (sh.k === 0) {
-      g.fillStyle = c; g.fillRect(x, y, sh.s, sh.s);
+      paint(c); g.fillRect(x, y, sh.s, sh.s);
       rect(x + 2, y + 2, sh.s - 4, sh.s - 4, rgb(mix(P.ink, P.sky[0], 0.4)));
     } else if (sh.k === 1) {
-      g.fillStyle = c;
+      paint(c);
       g.beginPath(); g.moveTo(x, y + sh.s); g.lineTo(x + sh.s / 2, y); g.lineTo(x + sh.s, y + sh.s);
       g.closePath(); g.fill();
     } else {
@@ -1026,7 +1067,7 @@ function drawShooter(s, P, t, dt) {
   if (s.hurt > 0) {
     s.hurt -= dt;
     g.globalAlpha = 0.18 * s.hurt;
-    g.fillStyle = rgb([220, 120, 110]);
+    paint(rgb([220, 120, 110]));
     g.fillRect(0, 0, VW, VH);
     g.globalAlpha = 1;
   }
@@ -1055,7 +1096,7 @@ function drawDuel(s, P, t, dt) {
   rect(0, 88, VW, VH - 88, rgb(mix(P.deep, P.sky[2], 0.3)));
   rect(0, 88, VW, 1, rgba(mix(P.accent, P.sun, 0.3), 0.5));
   // прожектор: бойцы стоят в свете
-  g.fillStyle = rgba(mix(P.sun, P.accent, 0.35), 0.07);
+  paint(rgba(mix(P.sun, P.accent, 0.35), 0.07));
   g.beginPath();
   g.moveTo(VW / 2 - 7, 0); g.lineTo(VW / 2 + 7, 0);
   g.lineTo(VW / 2 + 82, VH); g.lineTo(VW / 2 - 82, VH);
@@ -1190,9 +1231,9 @@ function drawDragon(s, P, t, dt) {
   const flap = Math.sin(t * 3.4);
   for (let side = -1; side <= 1; side += 2) {      // два крыла: дальнее темнее
     const back = side < 0;
-    g.fillStyle = back
+    paint(back
       ? rgba(mix(P.deep, P.accent, 0.3), 0.85)
-      : rgba(mix(P.accent, P.sun, 0.4), 0.62);
+      : rgba(mix(P.accent, P.sun, 0.4), 0.62));
     g.beginPath();
     g.moveTo(d.x, d.y + (back ? -2 : 0));
     g.lineTo(d.x - d.dir * (16 + (back ? 5 : 0)), d.y - 15 - flap * 13);
@@ -1200,7 +1241,7 @@ function drawDragon(s, P, t, dt) {
     g.lineTo(d.x - d.dir * 10, d.y + 5);
     g.closePath(); g.fill();
     for (let k = 1; k <= 3; k++) {                 // «пальцы» крыла
-      g.fillStyle = back ? rgb(P.deep) : rgba(mix(P.deep, P.accent, 0.35), 0.75);
+      paint(back ? rgb(P.deep) : rgba(mix(P.deep, P.accent, 0.35), 0.75));
       g.beginPath();
       g.moveTo(d.x - d.dir * 2, d.y + 1);
       g.lineTo(d.x - d.dir * (10 + k * 6), d.y - 12 - flap * (11 - k * 2) + k * 3);
@@ -1348,7 +1389,7 @@ function drawIsland(s, P, t, dt) {
   }
   // передний план: камни, чтобы кадр не был плоским
   for (const rk of s.rocks) {
-    g.fillStyle = rgb(mix(P.deep, P.sky[1], 0.05));
+    paint(rgb(mix(P.deep, P.sky[1], 0.05)));
     g.beginPath();
     g.moveTo(rk.x, VH);
     g.lineTo(rk.x + rk.w * 0.15, VH - rk.h);
@@ -1356,6 +1397,502 @@ function drawIsland(s, P, t, dt) {
     g.lineTo(rk.x + rk.w, VH);
     g.closePath(); g.fill();
   }
+}
+
+// --- поезд: вид из вагона, за окном бегут поля
+function buildTrain(r, P) {
+  return {
+    layers: [0, 1, 2].map((i) => ({
+      speed: [9, 24, 52][i], base: [58, 72, 86][i], amp: [16, 11, 7][i],
+      freq: [0.011, 0.019, 0.03][i], seed: r() * 400,
+      color: mix(P.sky[2], P.ink, [0.22, 0.48, 0.74][i]),
+    })),
+    towers: Array.from({ length: 5 }, (_, i) => ({ x: i * 70 + r() * 40, h: rndRange(r, 12, 30) })),
+    lights: Array.from({ length: 16 }, () => ({ x: r() * VW, y: rndRange(r, 58, 80) })),
+    poles: Array.from({ length: 3 }, (_, i) => ({ x: -30 - i * 96 })),
+    steam: [],
+    cup: { x: 202, y: 108 },
+  };
+}
+function drawTrain(s, P, t, dt) {
+  rect(0, 0, VW, VH, rgb(mix(P.deep, P.accent, 0.16)));
+  rect(0, 0, VW, 20, rgb(mix(P.deep, P.ink, 0.42)));          // потолок
+  rect(0, 19, VW, 1, rgba(mix(P.sun, P.accent, 0.35), 0.3));
+  rect(58, 9, 204, 2, rgb(mix(P.deep, P.sun, 0.16)));         // багажная полка
+  for (const x of [80, 152, 224]) {
+    rect(x, 11, 1, 6, rgba(P.deep, 0.6));
+    rect(x - 4, 17, 9, 3, rgb(mix(P.deep, P.accent, 0.22)));
+  }
+  const WX = 44, WY = 20, WW = 232, WH = 82;
+  g.save();
+  g.beginPath(); g.rect(WX, WY, WW, WH); g.clip();
+  bandGradient(WY, 60, [P.sky[0], P.sky[1], P.sky[2]]);
+  for (const l of s.lights) {                                  // далёкие огни
+    l.x -= 3 * dt;
+    if (l.x < WX - 4) l.x = WX + WW + 4;
+    rect(l.x, l.y, 1, 1, rgba(mix(P.sun, [255, 220, 160], 0.4), 0.6));
+  }
+  for (const tw of s.towers) {                                 // дальние домики
+    tw.x -= 11 * dt;
+    if (tw.x < WX - 30) tw.x = WX + WW + 20;
+    rect(tw.x, 86 - tw.h, 8, tw.h, rgb(mix(P.deep, P.sky[1], 0.25)));
+    rect(tw.x + 9, 86 - tw.h * 0.6, 5, tw.h * 0.6, rgb(mix(P.deep, P.sky[1], 0.3)));
+  }
+  for (const l of s.layers) {
+    const off = t * l.speed;
+    paint(rgb(l.color));
+    g.beginPath();
+    g.moveTo(WX, 96);
+    for (let x = 0; x <= WW; x += 3) {
+      const wx = ((x + off) % 240 + 240) % 240;
+      g.lineTo(WX + x, l.base - (ridge(l.seed + wx * l.freq, 1, 4) * 0.5 + 0.5) * l.amp);
+    }
+    g.lineTo(WX + WW, 96); g.closePath(); g.fill();
+    for (let y = l.base + 2; y < 96; y += 3) {                 // борозды поля
+      const px = ((y * 7 + off * 0.4) % 12);
+      ditherFill(WX + px, y, WW, 1, rgba(mix(l.color, P.ink, 0.35), 0.4), 0);
+    }
+  }
+  for (const p of s.poles) {                                   // столбы у путей
+    p.x -= 168 * dt;
+    if (p.x < WX - 12) p.x += 288;
+    rect(p.x, 40, 2, 56, rgb(mix(P.deep, P.ink, 0.3)));
+    rect(p.x - 6, 38, 14, 2, rgb(mix(P.deep, P.ink, 0.3)));
+  }
+  g.globalAlpha = 0.12;                                        // отсвет на стекле
+  ditherFill(WX, WY, WW, WH, rgb([255, 250, 240]), 0);
+  g.globalAlpha = 1;
+  g.restore(); resetPaint();
+  rect(WX - 2, WY - 2, WW + 4, 3, rgb(mix(P.deep, P.sun, 0.22)));   // рама
+  rect(WX - 2, WY + WH - 1, WW + 4, 3, rgb(mix(P.deep, P.sun, 0.18)));
+  rect(WX - 3, WY, 3, WH, rgb(mix(P.deep, P.sun, 0.2)));
+  rect(WX + WW, WY, 3, WH, rgb(mix(P.deep, P.sun, 0.2)));
+  // занавеска
+  for (let x = 36; x < 50; x += 3) rect(x, 22, 2, 84, rgba(mix(P.accent, P.deep, 0.5), 0.5));
+  for (let x = 270; x < 284; x += 3) rect(x, 22, 2, 84, rgba(mix(P.accent, P.deep, 0.5), 0.4));
+  // столик и чай
+  rect(0, 118, VW, 3, rgb(mix(P.deep, P.sun, 0.24)));
+  rect(0, 121, VW, VH - 121, rgb(mix(P.deep, P.accent, 0.1)));
+  rect(148, 108, 26, 10, rgb(mix(P.pale, P.sky[2], 0.35)));       // блокнот
+  rect(152, 111, 18, 1, rgba(P.deep, 0.4));
+  rect(152, 114, 14, 1, rgba(P.deep, 0.3));
+  rect(112, 110, 14, 8, rgb(mix(P.deep, P.sky[1], 0.3)));         // плеер
+  rect(116, 113, 2, 2, rgba(P.accent, 0.8));
+  rect(121, 113, 2, 2, rgba(P.accent, 0.8));
+  const cp = s.cup;
+  rect(cp.x, cp.y, 9, 9, rgb(mix(P.pale, P.sky[2], 0.45)));
+  rect(cp.x, cp.y, 9, 2, rgb(mix(P.pale, P.sun, 0.3)));
+  rect(cp.x + 9, cp.y + 3, 2, 3, rgb(mix(P.pale, P.sky[2], 0.45)));
+  rect(cp.x - 4, cp.y + 9, 17, 2, rgb(mix(P.deep, P.sun, 0.2)));
+  if (Math.random() < 0.5) s.steam.push({ x: cp.x + 4, y: cp.y - 1, life: 1.2, age: 0 });
+  drift(s.steam, { vx: [-3, 3], vy: [-11, -6], wobbleFreq: 2, wobble: 3, fade: (p) => 1 - p.age / p.life }, dt, rgba(P.pale, 0.25));
+  s.steam = s.steam.filter((p) => { p.age += dt; return p.age < p.life; });
+}
+
+// --- пустыня: дюны, караван, обелиск, зной
+function buildDesert(r, P) {
+  return {
+    dunes: [0, 1, 2].map((i) => ({
+      base: [92, 114, 140][i], amp: [24, 19, 15][i], freq: [0.006, 0.011, 0.017][i],
+      seed: r() * 500, speed: [1.6, 4.5, 10][i],
+      color: mix(P.sky[2], P.ink, [0.22, 0.48, 0.74][i]),
+    })),
+    caravan: { x: 330, speed: 13 },
+    monolith: { x: rndRange(r, 40, 90), h: rndRange(r, 30, 46) },
+    vultures: Array.from({ length: 2 }, () => ({ x: r() * VW, y: rndRange(r, 26, 52), p: r() * 6, s: rndRange(r, 2, 3) })),
+    ripples: Array.from({ length: 30 }, () => ({ x: r() * VW, y: rndRange(r, 112, 174), len: rndRange(r, 6, 22), a: rndRange(r, 0.06, 0.18) })),
+    sand: particles(r, 30, { vx: [3, 9], vy: [-1, 1], size: [1, 1] }),
+  };
+}
+function drawDesert(s, P, t, dt) {
+  bandGradient(0, 92, [
+    mix(P.sky[0], P.accent, 0.2),
+    mix(P.sky[1], [255, 214, 160], 0.35),
+    mix(P.sky[2], [255, 226, 176], 0.5),
+  ]);
+  const sx = 244, sy = 34, sr = 11;
+  glow(sx, sy, 40, rgba(mix(P.sun, [255, 220, 150], 0.5), 0.2), 1);
+  for (let y = -sr; y <= sr; y++) {
+    const dx = Math.sqrt(Math.max(0, sr * sr - y * y)) | 0;
+    rect(sx - dx, sy + y, dx * 2, 1, rgb(mix(P.sun, [255, 246, 220], 0.55)));
+  }
+  for (const v of s.vultures) {                    // грифы кружат
+    v.x -= 5 * dt;
+    if (v.x < -12) v.x = VW + 10;
+    const flap = Math.sin(t * 3 + v.p) > 0;
+    const c = rgb(mix(P.ink, P.sky[1], 0.2));
+    rect(v.x, v.y + Math.sin(t * 0.8 + v.p) * 3, v.s * 3, 1, c);
+    rect(v.x - v.s, v.y - (flap ? 2 : 0) + Math.sin(t * 0.8 + v.p) * 3, v.s, 1, c);
+    rect(v.x + v.s * 3, v.y - (flap ? 2 : 0) + Math.sin(t * 0.8 + v.p) * 3, v.s, 1, c);
+  }
+  const mon = s.monolith;                          // обелиск
+  rect(mon.x, 92 - mon.h, 8, mon.h, rgb(mix(P.deep, P.ink, 0.3)));
+  rect(mon.x + 1, 92 - mon.h, 2, mon.h, rgba(mix(P.sun, P.accent, 0.4), 0.25));
+  for (const d of s.dunes) {
+    const off = t * d.speed;
+    paint(rgb(d.color));
+    g.beginPath();
+    g.moveTo(0, VH);
+    for (let x = 0; x <= VW; x += 2) {
+      const wx = ((x + off) % 260 + 260) % 260;
+      g.lineTo(x, d.base - (ridge(d.seed + wx * d.freq, 1, 4) * 0.5 + 0.5) * d.amp);
+    }
+    g.lineTo(VW, VH); g.closePath(); g.fill();
+  }
+  for (const rp of s.ripples) {                    // рябь на песке
+    rp.x -= 4 * dt;
+    if (rp.x < -24) rp.x = VW + 10;
+    rect(rp.x, rp.y, rp.len, 1, rgba(mix(P.sun, [255, 240, 200], 0.4), rp.a));
+  }
+  // караван идёт справа налево
+  const cv = s.caravan;
+  cv.x -= cv.speed * dt;
+  if (cv.x < -60) cv.x = VW + 40;
+  const phase = Math.floor(t * 4) % 2;
+  for (let i = 0; i < 3; i++) {
+    const cx = cv.x + i * 20, cy = 130 + Math.sin(t * 1.4 + i) * 1.2 + i;
+    const art = phase ? SPRITES.camelB : SPRITES.camelA;
+    sprite(art, cx, cy, { a: rgb(mix(P.deep, P.ink, 0.25)) }, true);
+    rect(cx - 1, cy + 7, 11, 1, rgba(P.deep, 0.3));
+  }
+  rect(0, 168, VW, VH - 168, rgb(mix(P.deep, P.ink, 0.2)));   // ближний гребень
+  for (let x = 0; x < VW; x += 7) rect(x, 168 - ((x * 13) % 3), 4, 1, rgb(mix(P.deep, P.ink, 0.2)));
+  drift(s.sand, { vx: [3, 9], vy: [-1, 1], fade: () => 0.35 }, dt, rgba(mix(P.sun, [255, 230, 180], 0.4), 0.3));
+}
+
+// --- руины: колонны, арка, лучи света, папоротники
+function buildRuins(r, P) {
+  return {
+    columns: Array.from({ length: 8 }, (_, i) => ({
+      x: 6 + i * 44 + rndRange(r, -9, 9), h: rndRange(r, 44, 104), w: rndInt(r, 9, 15),
+      cap: r() < 0.6, seed: r() * 9,
+    })),
+    vines: Array.from({ length: 18 }, () => ({ x: r() * VW, len: rndRange(r, 12, 46), y: rndRange(r, 0, 40), p: r() * 6 })),
+    moss: Array.from({ length: 34 }, () => ({ x: r() * VW, y: rndRange(r, 118, 176), s: rndRange(r, 2, 7) })),
+    ferns: Array.from({ length: 9 }, (_, i) => ({ x: i * 38 + rndRange(r, -12, 12), h: rndRange(r, 10, 22) })),
+    flies: particles(r, 20, { vx: [-3, 3], vy: [-2, 2] }),
+    ray: r() * 30,
+  };
+}
+function drawRuins(s, P, t, dt) {
+  bandGradient(0, 150, [
+    mix(P.sky[1], P.fog, 0.45),
+    mix(P.sky[2], P.fog, 0.35),
+    mix(P.sky[2], P.fog, 0.2),
+  ]);
+  // лучи света сквозь прорехи в крыше
+  for (let i = 0; i < 3; i++) {
+    const x = 40 + i * 96 + Math.sin(t * 0.2 + i) * 6;
+    paint(rgba(mix(P.sun, P.glow, 0.4), 0.07));
+    g.beginPath();
+    g.moveTo(x, 0); g.lineTo(x + 26, 0); g.lineTo(x + 64, 150); g.lineTo(x + 10, 150);
+    g.closePath(); g.fill();
+  }
+  // арка на дальней стене
+  const ax = 120, aw = 76, ab = 150;
+  rect(ax - 6, 62, 8, ab - 62, rgb(mix(P.deep, P.sky[1], 0.3)));
+  rect(ax + aw - 2, 62, 8, ab - 62, rgb(mix(P.deep, P.sky[1], 0.3)));
+  for (let i = 0; i <= 30; i++) {
+    const a = Math.PI * (i / 30);
+    rect(ax + aw / 2 - Math.cos(a) * (aw / 2 + 6), 62 - Math.sin(a) * 22, 5, 5, rgb(mix(P.deep, P.sky[1], 0.3)));
+  }
+  rect(ax, 84, aw, ab - 84, rgba(mix(P.deep, P.ink, 0.45), 0.85));
+  for (const v of s.vines) {                       // лианы
+    const sway = Math.sin(t * 0.7 + v.p) * 2;
+    for (let y = 0; y < v.len; y++) rect(v.x + sway * (y / v.len), v.y + y, 1, 1, rgb(mix(P.deep, P.accent, 0.3)));
+    rect(v.x + sway, v.y + v.len, 2, 2, rgb(mix(P.deep, P.accent, 0.4)));
+  }
+  // колонны: сначала дальние, потом ближние
+  for (let pass = 0; pass < 2; pass++) {
+    for (const c of s.columns) {
+      const near = c.x % 2 === pass;
+      const col = rgb(mix(P.deep, pass ? P.sky[1] : P.ink, pass ? 0.28 : 0.12));
+      rect(c.x, 150 - c.h, c.w, c.h, col);
+      rect(c.x, 150 - c.h, c.w, 2, rgb(mix(col, [255, 250, 230], 0.12)));
+      for (let y = 150 - c.h + 4; y < 150; y += 5) rect(c.x, y, c.w, 1, rgba(P.deep, pass ? 0.25 : 0.45));
+      if (c.cap) rect(c.x - 2, 150 - c.h - 4, c.w + 4, 4, col);
+      if (c.x % 3 < 1) rect(c.x + 1, 150 - c.h, c.w - 3, 3, rgba(P.deep, 0.5));   // скол
+    }
+  }
+  rect(0, 150, VW, VH - 150, rgb(mix(P.deep, P.accent, 0.14)));   // пол
+  for (const m of s.moss) {
+    ditherFill(m.x, m.y, m.s * 2, 2, rgba(mix(P.accent, P.deep, 0.35), 0.5), m.s & 1);
+  }
+  for (const f of s.ferns) {                       // папоротники на переднем плане
+    const sway = Math.sin(t * 0.9 + f.x) * 2;
+    for (let a = 0; a < 5; a++) {
+      const ang = -1.9 - a * 0.3;
+      for (let l = 2; l < f.h; l++) {
+        rect(f.x + Math.cos(ang) * l + sway, VH - 2 + Math.sin(ang) * l, 2, 1, rgb(mix(P.deep, P.accent, 0.25)));
+      }
+    }
+  }
+  if (P.time === 'ночь' || P.time === 'гроза') {
+    drift(s.flies, { vx: [-4, 4], vy: [-3, 3], wobbleFreq: 2, wobble: 5, fade: (p) => 0.3 + 0.7 * Math.abs(Math.sin(NOW * 1.5 + p.p)) }, dt,
+      () => rgba(mix(P.pale, [255, 240, 170], 0.5), 0.8));
+  }
+}
+
+// --- маяк: луч по кругу, море, скалы
+function buildLighthouse(r, P) {
+  return {
+    stars: Array.from({ length: 60 }, () => ({ x: r() * VW, y: r() * 100, p: r() * 6, s: r() < 0.85 ? 1 : 2 })),
+    clouds: Array.from({ length: 3 }, () => ({ x: r() * VW, y: rndRange(r, 30, 62), w: rndRange(r, 40, 80), s: rndRange(r, 2, 5) })),
+    waves: Array.from({ length: 26 }, (_, i) => ({ y: 108 + i * 3, len: rndRange(r, 8, 26), x: r() * VW, v: rndRange(r, 3, 11), a: rndRange(r, 0.1, 0.3) })),
+    ship: { x: rndRange(r, 40, 120) },
+    gulls: Array.from({ length: 3 }, () => ({ x: r() * VW, y: rndRange(r, 70, 96), p: r() * 6, v: rndRange(r, 5, 11) })),
+    foam: particles(r, 22, { vx: [-4, 4], vy: [-4, 0], spanY: [140, 172], size: [1, 2] }),
+  };
+}
+function drawLighthouse(s, P, t, dt) {
+  bandGradient(0, 104, [
+    mix(P.deep, P.sky[0], 0.4),
+    mix(P.deep, P.sky[1], 0.3),
+    mix(P.ink, P.sky[2], 0.25),
+  ]);
+  for (const st of s.stars) {
+    const tw = 0.5 + 0.5 * Math.sin(t * 1.5 + st.p);
+    rect(st.x, st.y, st.s, st.s, rgba(P.sun, 0.75 * tw));
+  }
+  for (const c of s.clouds) {                      // низкие тучи
+    const x = ((c.x + t * c.s) % (VW + 110) + VW + 110) % (VW + 110) - 55;
+    ditherFill(x, c.y, c.w, 5, rgba(mix(P.deep, P.sky[1], 0.35), 0.5), 0);
+    ditherFill(x + 8, c.y - 4, c.w - 18, 4, rgba(mix(P.deep, P.sky[1], 0.28), 0.4), 1);
+  }
+  rect(0, 104, VW, VH - 104, rgb(mix(P.deep, P.sky[1], 0.3)));    // море
+  rect(0, 104, VW, 1, rgba(mix(P.sun, P.accent, 0.35), 0.3));
+  for (const w of s.waves) {
+    w.x += w.v * dt;
+    if (w.x > VW) w.x = -w.len;
+    rect(w.x, w.y, w.len, 1, rgba(mix(P.sun, P.accent, 0.3), w.a * 0.7));
+  }
+  const sh = s.ship;                               // корабль на горизонте
+  sh.x += 1.6 * dt;
+  if (sh.x > VW + 20) sh.x = -20;
+  rect(sh.x, 100, 16, 3, rgb(mix(P.deep, P.ink, 0.3)));
+  rect(sh.x + 6, 96, 4, 4, rgb(mix(P.deep, P.ink, 0.3)));
+  rect(sh.x + 7, 93, 2, 4, rgba(mix(P.sun, P.accent, 0.4), 0.6));
+  rect(sh.x + 2, 100, 1, 1, rgba([255, 190, 140], 0.85));
+  for (const g of s.gulls) {
+    g.x -= g.v * dt;
+    if (g.x < -10) g.x = VW + 8;
+    const flap = Math.sin(t * 6 + g.p) > 0;
+    sprite(flap ? SPRITES.birdA : SPRITES.birdB, g.x, g.y, { a: rgba(P.ink, 0.7) }, false);
+  }
+  // скала и маяк
+  const cliff = rgb(mix(P.deep, P.ink, 0.2));
+  silhouette(61, 128, 22, 0.02, rgb(mix(P.deep, P.sky[1], 0.12)), 2);
+  paint(cliff);
+  g.beginPath();
+  g.moveTo(196, VH); g.lineTo(210, 108); g.lineTo(238, 96); g.lineTo(300, 104); g.lineTo(320, VH);
+  g.closePath(); g.fill();
+  const lx = 262, baseY = 100, topY = 38;
+  for (let y = topY; y < baseY; y++) {             // сужающаяся башня
+    const k = (y - topY) / (baseY - topY);
+    const w = 5 + k * 5;
+    rect(lx - w / 2, y, w, 1, k > 0.32 && k < 0.42 ? rgb(mix(P.pale, P.accent, 0.3)) : rgb(mix(P.sky[1], P.ink, 0.45)));
+  }
+  rect(lx - 8, 44, 16, 3, rgb(mix(P.deep, P.sky[2], 0.4)));       // галерея
+  rect(lx - 6, topY - 6, 12, 10, rgb(mix(P.deep, P.ink, 0.25)));  // лампа
+  rect(lx - 4, topY - 4, 8, 6, rgb(mix(P.sun, [255, 240, 190], 0.55)));
+  paint(rgb(mix(P.deep, P.ink, 0.25)));
+  g.beginPath(); g.moveTo(lx - 8, topY - 6); g.lineTo(lx, topY - 14); g.lineTo(lx + 8, topY - 6);
+  g.closePath(); g.fill();
+  // луч: медленно ходит по морю
+  const ang = Math.sin(t * 0.32) * 1.15;
+  const bx = lx, by = topY - 1;
+  const ex = bx + Math.cos(Math.PI + ang) * 300, ey = by + Math.sin(ang) * 70;
+  g.globalAlpha = 0.16 + 0.07 * Math.sin(t * 1.9);
+  paint(rgb(mix(P.sun, [255, 244, 200], 0.45)));
+  g.beginPath(); g.moveTo(bx, by); g.lineTo(ex, ey - 13); g.lineTo(ex, ey + 13); g.closePath(); g.fill();
+  g.globalAlpha = 1;
+  glow(bx, by, 12, rgba(mix(P.sun, [255, 240, 190], 0.6), 0.5), 1);
+  drift(s.foam, { vx: [-4, 4], vy: [-4, 0], fade: (p) => 0.4 }, dt, rgba(mix(P.pale, P.sky[2], 0.4), 0.4));
+  // передний план: камни
+  paint(rgb(mix(P.deep, P.ink, 0.05)));
+  g.beginPath();
+  g.moveTo(0, VH); g.lineTo(14, 160); g.lineTo(40, 168); g.lineTo(58, VH); g.closePath(); g.fill();
+  g.beginPath();
+  g.moveTo(90, VH); g.lineTo(104, 170); g.lineTo(126, VH); g.closePath(); g.fill();
+}
+
+// --- метро: платформа, поезд из тоннеля, ожидание
+function buildSubway(r, P) {
+  return {
+    train: { x: 340, state: 'idle', next: 6 + r() * 5, v: 0 },
+    traveler: { x: rndRange(r, 60, 120), p: r() * 6, phone: 0 },
+    litter: Array.from({ length: 8 }, () => ({ x: r() * VW, y: rndRange(r, 152, 176), p: r() * 6 })),
+    flicker: r() * 4,
+    tubes: [46, 160, 276],
+  };
+}
+function drawSubway(s, P, t, dt) {
+  rect(0, 0, VW, 150, rgb(mix(P.deep, P.sky[1], 0.22)));          // стена
+  for (let y = 6; y < 118; y += 8) {                              // плитка
+    rect(0, y, VW, 1, rgba(P.deep, 0.28));
+    for (let x = ((y / 8) % 2) * 8; x < VW; x += 16) rect(x, y, 1, 8, rgba(P.deep, 0.22));
+  }
+  rect(0, 116, VW, 3, rgb(mix(P.pale, P.sky[2], 0.4)));           // бордюр
+  rect(0, 119, VW, 31, rgb(mix(P.deep, P.ink, 0.5)));             // путь
+  for (let x = 0; x < VW; x += 12) rect(x, 132, 8, 2, rgb(mix(P.deep, P.accent, 0.14)));
+  rect(0, 126, VW, 1, rgb(mix(P.sky[2], P.ink, 0.35)));
+  rect(0, 138, VW, 1, rgb(mix(P.sky[2], P.ink, 0.35)));
+  rect(0, 150, VW, VH - 150, rgb(mix(P.deep, P.accent, 0.16)));   // платформа
+  rect(0, 150, VW, 1, rgba(mix(P.sun, P.accent, 0.4), 0.4));
+  rect(0, 147, VW, 3, rgb(mix(P.sun, P.accent, 0.4)));            // жёлтая линия
+  // тоннель
+  rect(268, 96, 52, 54, rgb(mix(P.deep, P.ink, 0.6)));
+  for (let i = 0; i < 16; i++) {
+    const a = Math.PI * (i / 15);
+    rect(268 + 26 - Math.cos(a) * 26, 96 - Math.sin(a) * 18, 6, 6, rgb(mix(P.deep, P.ink, 0.6)));
+  }
+  // постер и часы
+  rect(126, 44, 44, 30, rgba(P.deep, 0.5));
+  rect(127, 45, 42, 28, rgb(mix(P.pale, P.sky[2], 0.45)));
+  rect(127, 45, 42, 9, rgba(mix(P.accent, P.sun, 0.3), 0.9));
+  rect(131, 58, 34, 2, rgba(P.deep, 0.35));
+  rect(131, 63, 26, 2, rgba(P.deep, 0.25));
+  rect(131, 68, 30, 2, rgba(P.deep, 0.2));
+  const cx = 216, cy = 54;
+  rect(cx - 9, cy - 9, 18, 18, rgb(mix(P.deep, P.ink, 0.3)));
+  rect(cx - 8, cy - 8, 16, 16, rgb(mix(P.pale, P.sky[2], 0.35)));
+  rect(cx, cy - 6, 1, 7, rgba(P.deep, 0.8));
+  rect(cx, cy, 4, 1, rgba(P.deep, 0.8));
+  // лампы дневного света
+  for (let i = 0; i < s.tubes.length; i++) {
+    const x = s.tubes[i];
+    const flick = 0.75 + 0.25 * Math.sin(t * 21 + i * 2) * (Math.random() < 0.04 ? 0.2 : 1);
+    rect(x, 10, 44, 3, rgba(mix(P.pale, [255, 255, 240], 0.5), 0.85 * flick));
+    glow(x + 22, 30, 34, rgba(mix(P.pale, P.sun, 0.3), 0.06 * flick), 1);
+    ditherFill(x - 20, 150, 84, 14, rgba(mix(P.pale, P.sun, 0.3), 0.06 * flick), 0);   // пятно на полу
+  }
+  // скамейка и пассажир
+  rect(24, 132, 52, 4, rgb(mix(P.deep, P.accent, 0.25)));
+  rect(28, 136, 3, 14, rgb(mix(P.deep, P.ink, 0.35)));
+  rect(69, 136, 3, 14, rgb(mix(P.deep, P.ink, 0.35)));
+  const tv = s.traveler;
+  rect(tv.x - 4, 128, 9, 16, rgb(mix(P.pale, P.accent, 0.35)));
+  rect(tv.x - 3, 121, 7, 7, rgb(mix(P.pale, [255, 226, 200], 0.5)));
+  rect(tv.x - 4, 144, 3, 7, rgb(mix(P.deep, P.accent, 0.3)));
+  rect(tv.x + 2, 144, 3, 7, rgb(mix(P.deep, P.accent, 0.3)));
+  rect(tv.x - 7, 130, 3, 9, rgb(mix(P.deep, P.accent, 0.3)));      // сумка
+  if ((t * 0.3) % 1 > 0.7) rect(tv.x + 4, 126, 4, 3, rgba([190, 230, 255], 0.7));
+  // поезд
+  const tr = s.train;
+  tr.next -= dt;
+  if (tr.state === 'idle' && tr.next < 2.6) {                     // свет из тоннеля
+    const g2 = 1 - tr.next / 2.6;
+    glow(292, 124, 16 * g2 + 6, rgba([255, 240, 200], 0.5 * g2), 1);
+  }
+  if (tr.state === 'idle' && tr.next <= 0) { tr.state = 'go'; tr.x = 340; tr.next = 11 + Math.random() * 7; }
+  if (tr.state === 'go') {
+    tr.x -= 470 * dt;
+    shake(0.18);
+    const bx = tr.x;
+    rect(bx, 96, 480, 62, rgb(mix(P.deep, P.ink, 0.35)));          // корпус
+    rect(bx, 96, 480, 4, rgb(mix(P.sky[2], P.ink, 0.3)));
+    for (let i = 0; i < 22; i++) {                                 // окна и двери
+      const wx = bx + 8 + i * 22;
+      if (wx < -24 || wx > VW + 8) continue;
+      rect(wx, 104, 14, 22, rgb(mix(P.pale, P.sky[2], 0.4)));
+      rect(wx + 2, 108, 10, 6, rgba(mix(P.sun, [255, 240, 200], 0.4), 0.75));
+    }
+    rect(bx, 132, 480, 4, rgb(mix(P.deep, P.accent, 0.3)));
+    if (bx > -20 && bx < VW) {                                     // ветер от поезда
+      for (const l of s.litter) l.x += 40 * dt * (1 + (l.y - 152) / 24);
+    }
+    if (tr.x < -480) tr.state = 'idle';
+  }
+  for (const l of s.litter) {                                      // мусор на платформе
+    l.x -= 2 * dt;
+    if (l.x < -4) l.x = VW + 4;
+    rect(l.x, l.y + Math.sin(t * 2 + l.p) * 1, 2, 1, rgba(mix(P.sky[2], P.ink, 0.3), 0.5));
+  }
+}
+
+// --- обсерватория: купол, телескоп, журнал наблюдений
+function buildObservatory(r, P) {
+  return {
+    stars: Array.from({ length: 90 }, () => ({ x: r() * VW, y: r() * 92, p: r() * 6, s: r() < 0.85 ? 1 : 2 })),
+    milky: Array.from({ length: 90 }, () => ({ x: r() * VW, y: r() * 92, s: rndRange(r, 1, 2) })),
+    scope: { ang: -0.62, drift: rndRange(r, -0.05, 0.05), glint: 0 },
+    shoot: { x: 0, y: 0, life: 0, next: 6 + r() * 8 },
+    lamp: { flick: 0 },
+    desk: { x: 176, y: 138 },
+  };
+}
+function drawObservatory(s, P, t, dt) {
+  const wall = rgb(mix(P.deep, P.ink, 0.38));
+  rect(0, 0, VW, VH, wall);                        // стена зала
+  // небо в прорези купола
+  bandGradient(0, 92, [mix(P.deep, P.sky[0], 0.5), mix(P.deep, P.sky[1], 0.32), mix(P.ink, P.sky[2], 0.25)]);
+  for (const st of s.stars) {
+    const tw = 0.45 + 0.55 * Math.sin(t * 1.6 + st.p);
+    rect(st.x, st.y, st.s, st.s, rgba(P.sun, 0.8 * tw));
+  }
+  g.globalAlpha = 0.16;                            // млечный путь
+  for (const m of s.milky) rect(m.x + m.y * 0.5, m.y, m.s, m.s, rgb(mix(P.pale, P.sky[1], 0.3)));
+  g.globalAlpha = 1;
+  // падающая звезда
+  const sh = s.shoot;
+  sh.next -= dt;
+  if (sh.next <= 0) { sh.next = 9 + Math.random() * 10; sh.life = 0.7; sh.x = 40 + Math.random() * 200; sh.y = 10 + Math.random() * 40; }
+  if (sh.life > 0) {
+    sh.life -= dt;
+    const k = sh.life / 0.7;
+    for (let i = 0; i < 9; i++) rect(sh.x + i * 3, sh.y + i * 1.2, 2, 1, rgba(mix(P.pale, P.sun, 0.4), 0.8 * k * (1 - i / 9)));
+  }
+  // купол
+  const dome = rgb(mix(P.deep, P.ink, 0.3));
+  paint(dome);
+  g.beginPath();
+  g.moveTo(0, 0); g.lineTo(118, 0);
+  g.quadraticCurveTo(126, 60, 150, 96); g.lineTo(0, 96);
+  g.closePath(); g.fill();
+  g.beginPath();
+  g.moveTo(VW, 0); g.lineTo(212, 0);
+  g.quadraticCurveTo(206, 60, 190, 96); g.lineTo(VW, 96);
+  g.closePath(); g.fill();
+  rect(0, 92, VW, 60, wall);                       // стена под прорезью
+  for (let x = 0; x < 118; x += 6) rect(x, 90 + ((x * 7) % 3), 4, 2, rgba(P.ink, 0.35));   // заклёпки
+  // телескоп
+  const mx = 150, my = 152;
+  const ang = 0.34 + Math.sin(t * 0.14) * 0.05 + s.scope.drift;
+  g.save();
+  g.translate(mx, my);
+  g.rotate(ang);
+  paint(rgb(mix(P.sky[2], P.ink, 0.45)));
+  g.fillRect(-7, -96, 14, 96);
+  paint(rgb(mix(P.pale, P.sky[2], 0.35)));
+  g.fillRect(-6, -96, 4, 96);
+  paint(rgb(mix(P.deep, P.ink, 0.3)));
+  g.fillRect(-9, -100, 18, 8);
+  g.fillRect(-9, -16, 18, 6);
+  g.fillRect(-3, -112, 6, 12);
+  paint(rgba(mix(P.sun, P.pale, 0.5), 0.9));
+  g.fillRect(-5, -112, 10, 3);
+  g.restore(); resetPaint();
+  paint(rgb(mix(P.deep, P.ink, 0.35)));     // монтировка
+  g.beginPath(); g.moveTo(mx - 16, my + 14); g.lineTo(mx, my - 4); g.lineTo(mx + 16, my + 14); g.closePath(); g.fill();
+  rect(mx - 22, my + 12, 44, 4, rgb(mix(P.deep, P.ink, 0.35)));
+  rect(mx - 4, my + 2, 8, 8, rgb(mix(P.sky[2], P.ink, 0.4)));
+  // пол и рельс
+  rect(0, 152, VW, VH - 152, rgb(mix(P.deep, P.accent, 0.14)));
+  for (let y = 152; y < VH; y += 4) ditherFill(0, y, VW, 4, rgba(mix(P.deep, P.ink, 0.4), 0.25), y & 4 ? 0 : 1);
+  paint(rgba(mix(P.sky[2], P.ink, 0.35), 0.6));
+  for (let x = 20; x < VW; x += 2) rect(x, 164 + Math.sin((x / VW) * 3.14) * 4, 2, 1, rgba(mix(P.sky[2], P.ink, 0.4), 0.5));
+  // стол с лампой и журналом
+  const d = s.desk;
+  const flick = 0.85 + 0.15 * Math.sin(t * 13.7);
+  rect(d.x, d.y + 8, 84, 5, rgb(mix(P.deep, P.sun, 0.25)));
+  rect(d.x + 4, d.y + 13, 4, 16, rgb(mix(P.deep, P.ink, 0.35)));
+  rect(d.x + 74, d.y + 13, 4, 16, rgb(mix(P.deep, P.ink, 0.35)));
+  rect(d.x + 30, d.y + 2, 22, 6, rgb(mix(P.pale, P.sky[2], 0.4)));
+  rect(d.x + 33, d.y + 4, 16, 1, rgba(P.deep, 0.35));
+  rect(d.x + 12, d.y - 2, 8, 10, rgb(mix(P.deep, P.ink, 0.3)));
+  rect(d.x + 14, d.y - 6, 4, 5, rgba(mix(P.sun, [255, 236, 180], 0.5), 0.9 * flick));
+  glow(d.x + 16, d.y, 16, rgba(mix(P.sun, P.accent, 0.35), 0.16 * flick), 1);
+  rect(d.x + 22, d.y + 4, 3, 4, rgb(mix(P.pale, P.accent, 0.3)));   // кружка
 }
 
 const SCENES = {
@@ -1372,11 +1909,27 @@ const SCENES = {
   duel: { build: buildDuel, draw: drawDuel },
   dragon: { build: buildDragon, draw: drawDragon },
   island: { build: buildIsland, draw: drawIsland },
+  train: { build: buildTrain, draw: drawTrain },
+  desert: { build: buildDesert, draw: drawDesert },
+  ruins: { build: buildRuins, draw: drawRuins },
+  lighthouse: { build: buildLighthouse, draw: drawLighthouse },
+  subway: { build: buildSubway, draw: drawSubway },
+  observatory: { build: buildObservatory, draw: drawObservatory },
 };
 
-// ---------------------------------------------------------------- названия
+// ---------------------------------------------------------------- картридж
+// Каждый трек — отдельная вымышленная игра. Картридж собирается из того же
+// зерна, что и сцена: студия, название, слоган-идея, платформа, год, автор.
+// Двух одинаковых игр в эфире не бывает, а подпись ONE1GAME вшита в каждую.
+const STUDIOS = ['MOONSOFT', 'TALPIR WORKS', 'HOLLOW PINE', 'NEON KITE', 'DUST & CO',
+  'LITTLE ORBIT', 'SAD MACHINE', 'PAPER FROG', 'IVORY OWL', 'THIRD FLOOR',
+  'MOTH LAB', 'QUIET BELL', 'SALT & SILK', 'WIRE FOX', 'TIN ORCHARD'];
+const PLATFORMS = ['8-BIT', '16-BIT', 'ARCADE', 'CD-ROM', 'POCKET', 'PC-98', 'SUPER 16'];
+const RATINGS = ['ALL AGES', 'GENERAL', 'AGES 7+', 'FAMILY'];
+const AUTHORS = ['K. VOSS', 'M. ITO', 'A. LIND', 'P. NASH', 'R. SVEN', 'T. MIRA', 'J. OYAMA', 'D. HALE'];
 const TITLE_A = ['SHADOW', 'NEON', 'PALE', 'ASHEN', 'SILENT', 'DISTANT', 'HOLLOW', 'FADED',
-  'WINTER', 'MIDNIGHT', 'VELVET', 'PAPER', 'IRON', 'SOFT', 'QUIET', 'LONELY', 'AMBER', 'FROZEN'];
+  'WINTER', 'MIDNIGHT', 'VELVET', 'PAPER', 'IRON', 'SOFT', 'QUIET', 'LONELY', 'AMBER', 'FROZEN',
+  'GLASS', 'RUSTED', 'SECOND', 'LITTLE', 'GOLDEN', 'LAST'];
 const TITLE_B = {
   platformer: ['HOP', 'LEAP', 'TRAIL', 'RUNNER', 'ROOFS'],
   rpg: ['HAMLET', 'VALE', 'KEEPSAKE', 'LANTERN', 'HARVEST'],
@@ -1391,41 +1944,275 @@ const TITLE_B = {
   duel: ['BOUT', 'ARENA', 'REMATCH', 'RIVALS', 'ROUND TWO'],
   dragon: ['WYRM', 'KEEP', 'SPIRE', 'BANNER', 'SIEGE'],
   island: ['SHORE', 'LAGOON', 'HARBOR', 'PALMS', 'CROSSING'],
+  train: ['EXPRESS', 'PLATFORM', 'CARRIAGE', 'TIMETABLE', 'WINDOW'],
+  desert: ['DUNES', 'CARAVAN', 'OBELISK', 'MIRAGE', 'WELL'],
+  ruins: ['TEMPLE', 'COLUMNS', 'MOSS', 'NAVE', 'FOUNDATIONS'],
+  lighthouse: ['BEAM', 'KEEPER', 'HARBOUR', 'GALE', 'SIGNAL'],
+  subway: ['PLATFORM', 'TUNNEL', 'LAST TRAIN', 'TILES', 'GAP'],
+  observatory: ['LENS', 'DOME', 'COMET', 'LEDGER', 'STARFALL'],
 };
-const TITLE_C = ['', ' II', ' III', ' - DEMO', ' - CHAPTER ONE', ' [1994]', ' - REMASTERED', ' +'];
-function makeTitle(r, genre) {
-  return pick(r, TITLE_A) + ' ' + pick(r, TITLE_B[genre]) + pick(r, TITLE_C);
+const TITLE_C = ['', ' II', ' III', ' DX', ' TURBO', ' - DEMO', ' SPECIAL', ' [1994]', ' +'];
+// Слоган — это и есть «идея игры»: одна строка, вокруг которой всё крутится.
+const TAGLINES = {
+  platformer: ['climb before the tide turns', 'three towers, one lantern', 'the roof is not the end', 'carry the ember home', 'mind the gaps', 'every ledge is a promise', 'jump until the fog lifts'],
+  rpg: ['find the lantern, keep it lit', 'a village that forgot your name', 'trade bread for secrets', 'seven doors, one key', 'come back before winter', 'nobody returns the same'],
+  space: ['scan it before it scans you', 'the station stopped answering', 'ninety years from anywhere', 'follow the beacon home', 'last call from orbit', 'the drift remembers'],
+  cyber: ['trace a signal that knows you', 'it rains inside the walls too', 'nine floors of bad news', 'the city never logs off', 'follow the magenta wire', 'somebody is selling your dreams'],
+  dungeon: ['the vault keeps its promise', 'down is a direction, not a death', 'bring back the relic, maybe', 'torches only last so long', 'count the doors you pass', 'leave the gold, take the truth'],
+  underwater: ['deeper is quieter', 'the reef is a graveyard too', 'listen to the hull', 'nothing down here is in a hurry', 'surface when you remember the way', 'the dark is full of neighbours'],
+  vapor: ['outrun the sunset', 'the highway ends at the water', 'keep the cassette spinning', 'nobody beats that sky', 'one more lap before dawn', 'the engine remembers 1987'],
+  snow: ['find the cabin before dark', 'the pines are counting you', 'somebody left the light on', 'footprints fill in fast', 'a fire, a door, a name', 'keep walking, keep warm'],
+  abstract: ['observe', 'the shape is the subject', 'count the angles', 'silence has a geometry', 'watch until it means something', 'form over answers'],
+  shooter: ['destroy the drift', 'hold the line at sector nine', 'one ship, no reinforcements', 'the swarm is patient', 'clear the belt', 'your fuel is a rumour'],
+  duel: ['win the round, not the crowd', 'twelve seconds of courage', 'the arena remembers every loss', 'keep your guard up', 'no judges tonight', 'hit first or hit last'],
+  dragon: ['slay the wyrm', 'the keep is still burning', 'a dragon, a banner, one climb', 'wings over the valley', 'the moon is on its side', 'tell the castle you tried'],
+  island: ['reach the shore', 'the boat leaves at dawn', 'nobody maps this bay', 'palm trees and bad decisions', 'swim where the light is', 'the tide has opinions'],
+  train: ['the window is the game', 'six hours to nowhere', 'sip it before it cools', 'the fields keep arriving', 'last stop before morning', 'somewhere it is already spring'],
+  desert: ['cross before the heat', 'the dunes move at night', 'follow the caravan', 'one well, one rumour', 'water is the only map', 'walk at night, sleep at noon'],
+  ruins: ['the temple is overgrown', 'read the walls', 'moss keeps better records than kings', 'seven columns and a secret', 'the root is the key', 'leave a light in the nave'],
+  lighthouse: ['keep the lamp burning', 'the beam has to keep turning', 'ships pass, you stay', 'count the sails', 'the storm is a guest', 'salt in everything'],
+  subway: ['mind the gap', 'the last train is at 02:40', 'wait with everyone else', 'the map is a promise', 'listen for the brakes', 'some tunnel keeps going'],
+  observatory: ['watch what the sky confesses', 'the dome turns tonight', 'log everything, believe nothing', 'the lens fogs like breath', 'one more hour of stars', 'the sky does not blink'],
+};
+function makeGame(r, genre) {
+  const title = pick(r, TITLE_A) + ' ' + pick(r, TITLE_B[genre]) + pick(r, TITLE_C);
+  return {
+    studio: pick(r, STUDIOS),
+    title,
+    tagline: pick(r, TAGLINES[genre]),
+    platform: pick(r, PLATFORMS),
+    rating: pick(r, RATINGS),
+    author: pick(r, AUTHORS),
+    year: 1986 + Math.floor(r() * 14),
+  };
 }
 
+// ---------------------------------------------------------------- подпись
+// ONE1GAME вшит в каждую игру как часть кадра: где-то вывеска на столбе,
+// где-то неон на стене, где-то каменная табличка у входа. Плюс подсказка
+// в углу — как игровой приём, а не реклама.
+const BRAND = 'ONE1GAME';
+const BRAND_SUB = 'SUBSCRIBE';
+// Вид вывески и её место в кадре — у каждого жанра своё, поэтому подпись
+// читается частью мира, а не наклейкой сверху.
+const BRAND_KIND = {
+  platformer: ['plank', 'billboard'], rpg: ['plank', 'poster'], snow: ['plank', 'billboard'],
+  island: ['plank', 'billboard'], lighthouse: ['plank', 'stone'],
+  cyber: ['neon', 'screen'], abstract: ['neon', 'screen'], vapor: ['neon', 'billboard'],
+  dungeon: ['stone', 'poster'], ruins: ['stone', 'plaque'], underwater: ['stone', 'screen'],
+  space: ['screen', 'neon'], shooter: ['screen', 'neon'], observatory: ['plaque', 'poster'],
+  duel: ['banner', 'billboard'], dragon: ['banner', 'stone'],
+  train: ['poster', 'plaque'], subway: ['poster', 'neon'], desert: ['billboard', 'plank'],
+};
+const BRAND_POS = {
+  platformer: [226, 122], rpg: [12, 126], space: [14, 14], cyber: [224, 18],
+  dungeon: [14, 118], underwater: [234, 124], vapor: [224, 78], snow: [232, 124],
+  abstract: [16, 82], shooter: [12, 140], duel: [16, 42], dragon: [12, 96],
+  island: [18, 100], train: [186, 76], desert: [224, 112], ruins: [16, 122],
+  lighthouse: [212, 126], subway: [186, 86], observatory: [18, 120],
+};
+function brand(x, y, P, kind, sub, t) {
+  const w = textWidth(BRAND, 1) + 6;
+  const h = sub ? 16 : 9;
+  const wood = rgb(mix(P.deep, [122, 88, 56], 0.5));
+  const slab = rgb(mix(P.sky[1], P.ink, 0.3));
+  const shade = rgb(mix(P.deep, P.ink, 0.45));
+  const lit = rgba(mix(P.sun, P.pale, 0.55), 0.95);
+  const hot = rgba(mix(P.accent, P.sun, 0.35), 0.95);
+  const tone = kind === 'neon' || kind === 'screen' ? hot : lit;
+  if (kind === 'plank') {                          // доска на двух столбах
+    rect(x + 4, y + h, 2, 16, wood);
+    rect(x + w - 7, y + h, 2, 16, wood);
+    rect(x - 1, y - 1, w + 2, h + 2, shade);
+    rect(x, y, w, h, wood);
+    rect(x, y, w, 1, rgba(mix(wood, [255, 240, 210], 0.3), 0.6));
+  } else if (kind === 'stone') {                   // каменная табличка
+    rect(x - 1, y - 1, w + 2, h + 2, rgb(mix(P.deep, P.ink, 0.3)));
+    rect(x, y, w, h, slab);
+    rect(x + 1, y + 1, w - 2, h - 2, rgb(mix(slab, P.deep, 0.3)));
+  } else if (kind === 'neon') {                    // неоновая вывеска
+    glow(x - 3, y + h / 2 - 4, 12, rgba(mix(P.accent, P.sun, 0.3), 0.16), 1);
+    rect(x - 1, y - 1, w + 2, h + 2, rgba(mix(P.deep, P.accent, 0.35), 0.85));
+    const blink = 0.82 + 0.18 * Math.sin(t * 17.3);
+    g.globalAlpha = blink;
+  } else if (kind === 'screen') {                  // монитор с развёрткой
+    rect(x - 3, y - 3, w + 6, h + 6, rgb(mix(P.deep, P.ink, 0.4)));
+    rect(x - 2, y - 2, w + 4, h + 4, rgba(mix(mix(P.accent, P.sun, 0.3), P.ink, 0.55), 0.9));
+    for (let yy = y; yy < y + h; yy += 2) rect(x - 1, yy, w + 2, 1, rgba(P.deep, 0.18));
+  } else if (kind === 'banner') {                  // полотнище на шнуре
+    rect(x - 2, y - 3, w + 4, 1, rgb(shade));
+    rect(x, y, w, h + 2, rgb(mix(P.accent, P.deep, 0.45)));
+    for (let i = 1; i <= 2; i++) rect(x + i * 3, y + h + 2, 3, 1, rgb(mix(P.accent, P.deep, 0.45)));
+  } else if (kind === 'poster') {                  // бумага на стене
+    rect(x - 1, y - 1, w + 2, h + 2, rgba(P.deep, 0.6));
+    rect(x, y, w, h, rgb(mix(P.pale, P.sky[2], 0.4)));
+    rect(x, y, w, 3, rgba(mix(P.accent, P.sun, 0.3), 0.9));
+  } else if (kind === 'plaque') {                  // металлическая пластина
+    rect(x - 1, y - 1, w + 2, h + 2, rgb(mix(P.deep, P.ink, 0.4)));
+    rect(x, y, w, h, rgb(mix(P.sky[2], P.ink, 0.22)));
+    rect(x + 1, y + 1, 1, 1, rgba(mix(P.sun, P.accent, 0.4), 0.9));
+    rect(x + w - 2, y + 1, 1, 1, rgba(mix(P.sun, P.accent, 0.4), 0.9));
+  } else {                                         // рекламный щит
+    rect(x + 5, y + h, 2, 20, wood);
+    rect(x + w - 8, y + h, 2, 20, wood);
+    rect(x - 2, y - 2, w + 4, h + 4, shade);
+    rect(x, y, w, h, rgb(mix(P.deep, P.accent, 0.3)));
+  }
+  text(BRAND, x + 3, y + (sub ? 2 : 1), tone, 1);
+  if (sub) {
+    g.globalAlpha = (g.globalAlpha || 1) * 0.75;
+    text(BRAND_SUB, x + 3, y + 9, rgba(mix(P.sun, P.accent, 0.4), 0.9), 1);
+  }
+  g.globalAlpha = 1;
+}
+// Подсказка в углу: у каждого жанра своя формулировка, как игровой приём.
+const PROMPTS = {
+  platformer: 'PRESS START TO SUBSCRIBE', rpg: 'NEW QUEST: ONE1GAME',
+  space: 'BEACON: SUBSCRIBE TO ONE1GAME', cyber: 'TRACE ONE1GAME  SUBSCRIBE',
+  dungeon: 'A NEW DOOR OPENS: SUBSCRIBE', underwater: 'A VOICE FROM ABOVE: SUBSCRIBE',
+  vapor: 'ONE1GAME RADIO: SUBSCRIBE', snow: 'A SIGN IN THE SNOW: SUBSCRIBE',
+  abstract: 'OBSERVE ONE1GAME', shooter: 'INSERT COIN: SUBSCRIBE',
+  duel: 'TONIGHT S ROUND: ONE1GAME', dragon: 'THE BANNER READS: SUBSCRIBE',
+  island: 'SAIL WITH ONE1GAME', train: 'NEXT STOP: SUBSCRIBE',
+  desert: 'FOLLOW THE CARAVAN: ONE1GAME', ruins: 'THE WALLS SAY: SUBSCRIBE',
+  lighthouse: 'KEEP THE LIGHT ON: SUBSCRIBE', subway: 'MIND THE GAP   ONE1GAME',
+  observatory: 'FOUND IN THE SKY: ONE1GAME',
+};
+function drawPrompt(P, t) {
+  const cycle = 44, show = 7.5;
+  const inScene = t - director.startedAt;
+  const k = inScene % cycle;
+  if (inScene < 9 || k > show) return;
+  const a = Math.min(1, k / 0.7) * Math.min(1, (show - k) / 1.4);
+  g.globalAlpha = a * ((t * 2.2) % 1 > 0.32 ? 1 : 0.45);
+  const label = PROMPTS[director.genre] || 'SUBSCRIBE TO ONE1GAME';
+  const w = textWidth(label, 1);
+  rect(((VW - w) / 2 | 0) - 6, VH - 30, w + 12, 13, rgba(P.deep, 0.72));
+  text(label, ((VW - w) / 2) | 0, VH - 27, rgba(mix(P.sun, P.pale, 0.4), 0.95), 1);
+  rect(((VW - w) / 2 | 0) - 6, VH - 30, w + 12, 1, rgba(P.accent, 0.5));
+  g.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- погода
+// Один слой на все сцены: что сыплется с неба, решает жанр и время суток.
+// Один и тот же лес под дождём и в снегу читается разными играми.
+const WEATHER = {
+  platformer: ['leaves', 'none', 'rain'],
+  rpg: ['leaves', 'petals', 'rain'],
+  space: ['none', 'dust'],
+  cyber: ['rain', 'rain', 'none'],
+  dungeon: ['ash', 'dust'],
+  underwater: ['bubbles', 'bubbles', 'none'],
+  vapor: ['dust', 'petals', 'none'],
+  snow: ['snow', 'snow', 'none'],
+  abstract: ['none', 'dust'],
+  shooter: ['none', 'dust'],
+  duel: ['dust', 'none'],
+  dragon: ['ash', 'snow', 'none'],
+  island: ['petals', 'none', 'rain'],
+  train: ['rain', 'leaves', 'none'],
+  desert: ['dust', 'none'],
+  ruins: ['fireflies', 'leaves', 'none'],
+  lighthouse: ['rain', 'none'],
+  subway: ['none', 'dust'],
+  observatory: ['none', 'snow'],
+};
+const WEATHER_N = { rain: 70, snow: 60, ash: 44, petals: 34, leaves: 26, dust: 46, bubbles: 34, fireflies: 22 };
+function makeWeather(r, genre, time) {
+  const kind = pick(r, WEATHER[genre] || ['none']);
+  if (kind === 'none') return { kind: 'none', list: [] };
+  const n = WEATHER_N[kind] || 40;
+  const list = Array.from({ length: n }, () => ({
+    x: r() * VW, y: r() * VH, v: rndRange(r, 0.6, 1.4), p: r() * 6.28, s: r() < 0.75 ? 1 : 2,
+  }));
+  return { kind, list };
+}
+function drawWeather(P, t, dt) {
+  const w = director.weather;
+  if (!w || w.kind === 'none') return;
+  const kind = w.kind;
+  for (const p of w.list) {
+    if (kind === 'rain') {
+      p.y += (150 + p.v * 110) * dt;
+      p.x -= 30 * p.v * dt;
+      if (p.y > VH) { p.y = -10; p.x = Math.random() * VW + 24; }
+      if (p.x < -6) p.x = VW + 4;
+      rect(p.x, p.y, 1, p.v > 1.1 ? 6 : 3, rgba(mix(P.sky[2], P.sun, 0.35), 0.3));
+    } else if (kind === 'snow') {
+      p.y += 16 * p.v * dt;
+      p.x += (Math.sin(t * 0.7 + p.p) * 9 - 4) * dt;
+      if (p.y > VH) { p.y = -3; p.x = Math.random() * VW; }
+      if (p.x < -3) p.x = VW + 2; else if (p.x > VW + 3) p.x = -2;
+      rect(p.x, p.y, p.s, p.s, rgba(mix(P.pale, [255, 255, 255], 0.4), 0.65));
+    } else if (kind === 'ash') {
+      p.y += 9 * p.v * dt;
+      p.x += Math.sin(t * 1.3 + p.p) * 12 * dt;
+      if (p.y > VH) p.y = -3;
+      rect(p.x, p.y, p.s, p.s, rgba(mix(P.sky[2], P.sun, 0.25), 0.35));
+    } else if (kind === 'petals') {
+      p.y += 13 * p.v * dt;
+      p.x += Math.sin(t * 1.1 + p.p) * 16 * dt;
+      if (p.y > VH) { p.y = -3; p.x = Math.random() * VW; }
+      rect(p.x, p.y, 2, 1, rgba(mix(P.accent, P.sun, 0.45), 0.55));
+    } else if (kind === 'leaves') {
+      p.y += 15 * p.v * dt;
+      p.x += Math.sin(t * 1.6 + p.p) * 13 * dt;
+      if (p.y > VH) { p.y = -3; p.x = Math.random() * VW; }
+      rect(p.x, p.y + ((t * 3 + p.p) % 1 > 0.5 ? 0 : 1), 2, 1, rgba(mix(P.accent, [190, 130, 70], 0.5), 0.6));
+    } else if (kind === 'dust') {
+      p.x += (p.v * 7 + Math.sin(t * 0.9 + p.p) * 6) * dt;
+      p.y += Math.sin(t * 0.6 + p.p) * 5 * dt;
+      if (p.x > VW + 3) p.x = -3;
+      rect(p.x, p.y, 1, 1, rgba(mix(P.sun, P.accent, 0.3), 0.3));
+    } else if (kind === 'bubbles') {
+      p.y -= (10 + p.v * 12) * dt;
+      p.x += Math.sin(t * 1.7 + p.p) * 6 * dt;
+      if (p.y < -3) { p.y = VH + 3; p.x = Math.random() * VW; }
+      rect(p.x, p.y, p.s, p.s, rgba(mix(P.pale, P.sky[2], 0.4), 0.3));
+    } else if (kind === 'fireflies') {
+      p.x += Math.sin(t * 0.5 + p.p) * 8 * dt;
+      p.y += Math.cos(t * 0.4 + p.p * 1.7) * 7 * dt;
+      if (p.x < -3) p.x = VW + 2; else if (p.x > VW + 3) p.x = -2;
+      if (p.y < 40) p.y = VH - 10; else if (p.y > VH) p.y = 42;
+      const blink = Math.abs(Math.sin(t * 1.4 + p.p));
+      if (blink > 0.35) rect(p.x, p.y, 1, 1, rgba(mix(P.pale, [255, 240, 170], 0.5), 0.75 * blink));
+    }
+  }
+}
 // ---------------------------------------------------------------- режиссёр
 // Настроение радио -> жанр. Если музыки нет, жанр берётся по кругу.
 const MOOD_GENRE = {
-  dusty: ['platformer', 'rpg', 'snow'],
-  jazzhop: ['rpg', 'platformer', 'duel'],
-  chillhop: ['platformer', 'underwater', 'island'],
-  midnight: ['cyber', 'space', 'dungeon'],
-  ambient: ['space', 'underwater', 'island'],
-  experimental: ['abstract', 'cyber', 'underwater'],
-  'lofi-house': ['cyber', 'vapor', 'rpg'],
-  soul: ['rpg', 'duel', 'cyber'],
-  bossa: ['island', 'vapor', 'underwater'],
-  piano: ['snow', 'rpg', 'abstract'],
-  dark: ['dungeon', 'dragon', 'cyber'],
-  trap: ['shooter', 'cyber', 'dungeon'],
-  dub: ['underwater', 'cyber', 'dungeon'],
-  vapor: ['vapor', 'shooter', 'space'],
-  chip: ['shooter', 'platformer', 'vapor'],
-  guitar: ['vapor', 'platformer', 'dragon'],
-  strings: ['dragon', 'snow', 'dungeon'],
-  vocal: ['duel', 'abstract', 'cyber'],
-  musicbox: ['rpg', 'snow', 'abstract'],
-  bedroom: ['rpg', 'island', 'platformer'],
+  dusty: ['platformer', 'desert', 'snow'],
+  jazzhop: ['rpg', 'train', 'platformer'],
+  chillhop: ['train', 'platformer', 'island'],
+  midnight: ['cyber', 'subway', 'space'],
+  ambient: ['observatory', 'space', 'lighthouse'],
+  experimental: ['abstract', 'observatory', 'cyber'],
+  'lofi-house': ['cyber', 'vapor', 'subway'],
+  soul: ['ruins', 'rpg', 'duel'],
+  bossa: ['island', 'lighthouse', 'vapor'],
+  piano: ['observatory', 'snow', 'train'],
+  dark: ['dungeon', 'ruins', 'dragon'],
+  trap: ['shooter', 'subway', 'cyber'],
+  dub: ['underwater', 'subway', 'dungeon'],
+  vapor: ['vapor', 'desert', 'shooter'],
+  chip: ['shooter', 'subway', 'platformer'],
+  guitar: ['desert', 'vapor', 'platformer'],
+  strings: ['ruins', 'dragon', 'snow'],
+  vocal: ['duel', 'subway', 'abstract'],
+  musicbox: ['observatory', 'rpg', 'snow'],
+  bedroom: ['train', 'rpg', 'island'],
 };
 
 const director = {
   genre: null,
   scene: null,
   palette: null,
+  game: null,       // картридж: название, студия, слоган, год
+  brandKind: 'plank',
+  brandPos: [0, 0],
+  weather: null,
+  flash: 0,         // вспышка молнии
   title: '',
   objective: '',
   seed: 0,
@@ -1446,8 +2233,15 @@ function newScene(genre, seed, now) {
   director.seed = seed;
   director.palette = makePalette(r, genre);
   director.scene = SCENES[genre].build(r, director.palette);
-  director.title = makeTitle(r, genre);
+  director.game = makeGame(r, genre);
+  director.title = director.game.title;
   director.objective = GENRES[genre].objective;
+  // вывеска: вид и место чуть гуляют от сцены к сцене, чтобы подпись
+  // не стояла в одном и том же месте кадра
+  director.brandKind = pick(r, BRAND_KIND[genre] || ['plank']);
+  const bp = BRAND_POS[genre] || [12, 120];
+  director.brandPos = [bp[0] + Math.round(rndRange(r, -5, 5)), bp[1] + Math.round(rndRange(r, -4, 4))];
+  director.weather = makeWeather(r, genre, director.palette.time);
   director.startedAt = now;
   director.fade = 1;
   director.shot = 0;
@@ -1501,6 +2295,13 @@ function drawHud(P, t) {
   // очки вверху слева, растут как в настоящей игре
   text('SCORE ' + String(Math.floor(director.score)).padStart(6, '0'), 6, 6, ink, 1);
   text('LV ' + String(1 + (director.track & 0xff) % 9).padStart(2, '0'), 6, 15, soft, 1);
+  // «этикетка картриджа»: видно, что идёт другая игра, и она уходит сама
+  const fade = inScene > 40 ? Math.max(0, 1 - (inScene - 40) / 8) : 1;
+  if (fade > 0.02) {
+    g.globalAlpha = 0.5 * fade;
+    textCentered(director.game.title, 6, rgba(P.sun, 0.85), 1);
+    g.globalAlpha = 1;
+  }
   // «здоровье» справа
   for (let i = 0; i < 3; i++) {
     const x = VW - 8 - i * 8;
@@ -1517,23 +2318,45 @@ function drawHud(P, t) {
     rect(6, VH - 9, 60, 3, rgba(P.ink, 0.6));
     rect(6, VH - 9, 60 * ((t - director.startedAt) % 30) / 30, 3, rgba(P.accent, 0.8));
   }
+  drawPrompt(P, t);
 }
 
+// Карточка картриджа: как коробка от игры — студия, название, слоган, год.
 function drawTitleCard(P, t) {
   const inScene = t - director.startedAt;
   const showFor = 6.5;
   if (inScene > showFor) return;
   const k = Math.min(1, inScene / 0.6) * Math.min(1, (showFor - inScene) / 0.8);
   g.globalAlpha = Math.max(0, Math.min(1, k));
+  const G = director.game;
+  const soft = rgba(P.sun, 0.68);
   // кинематографичные полосы
-  rect(0, 0, VW, 16, rgb([0, 0, 0]));
-  rect(0, VH - 16, VW, 16, rgb([0, 0, 0]));
-  const label = GENRES[director.genre].label;
-  textCentered(label, 60, rgba(P.sun, 0.75), 1);
-  textCentered(director.title, 74, rgba(P.sun, 0.98), 2);
-  textCentered('1 PLAYER   PRESS START', 112, rgba(mix(P.sun, P.accent, 0.3), 0.8), 1);
+  rect(0, 0, VW, 15, rgb([0, 0, 0]));
+  rect(0, VH - 15, VW, 15, rgb([0, 0, 0]));
+  // шапка: издатель слева, платформа справа — как на коробке
+  text(BRAND + ' PRESENTS', 8, 4, rgba(mix(P.sun, P.accent, 0.35), 0.9), 1);
+  const right = G.platform + '  ' + G.rating;
+  text(right, VW - 8 - textWidth(right, 1), 4, rgba(P.accent, 0.85), 1);
+  // название и идея: с тенью, чтобы читалось и на светлой сцене
+  const shadow = rgba(mix(P.ink, [0, 0, 0], 0.4), 0.75);
+  textCentered(GENRES[director.genre].label, 49, shadow, 1);
+  textCentered(GENRES[director.genre].label, 48, rgba(P.accent, 0.85), 1);
+  const sc = textWidth(G.title, 2) <= VW - 44 ? 2 : 1;
+  textCentered(G.title, 61, shadow, sc);
+  textCentered(G.title, 60, rgba(P.sun, 0.98), sc);
+  const lw = Math.min(VW - 76, textWidth(G.tagline, 1) + 34);
+  rect(((VW - lw) / 2) | 0, 80, lw, 1, rgba(P.sun, 0.3));
+  rect(5, 80, 9, 1, rgba(P.accent, 0.6));
+  rect(VW - 14, 80, 9, 1, rgba(P.accent, 0.6));
+  textCentered(G.tagline, 86, shadow, 1);
+  textCentered(G.tagline, 85, rgba(mix(P.sun, P.accent, 0.4), 0.95), 1);
+  // низ: год, старт, автор
+  text('(C)' + G.year + ' ' + G.studio, 8, VH - 12, soft, 1);
+  const rw = 'DESIGN ' + G.author;
+  text(rw, VW - 8 - textWidth(rw, 1), VH - 12, soft, 1);
+  if ((t * 1.6) % 2 < 1.25) textCentered('PRESS START', VH - 12, rgba(P.sun, 0.9), 1);
   const dots = '.'.repeat(1 + (Math.floor(t * 2) % 3));
-  textCentered('LOADING' + dots, VH - 30, rgba(P.sun, 0.6), 1);
+  textCentered('LOADING' + dots, VH - 26, rgba(P.sun, 0.55), 1);
   g.globalAlpha = 1;
 }
 
@@ -1542,9 +2365,9 @@ function drawFrameOverlay(P, t) {
   const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.35, VW / 2, VH / 2, VH * 1.05);
   vg.addColorStop(0, 'rgba(0,0,0,0)');
   vg.addColorStop(1, 'rgba(10,8,14,0.55)');
-  g.fillStyle = vg; g.fillRect(0, 0, VW, VH);
+  paint(vg); g.fillRect(0, 0, VW, VH);
   g.globalAlpha = 0.05 + 0.02 * Math.sin(t * 0.7);
-  g.fillStyle = rgb(mix(P.accent, P.sun, 0.5));
+  paint(rgb(mix(P.accent, P.sun, 0.5)));
   g.fillRect(0, 0, VW, VH);
   g.globalAlpha = 1;
   // строки развёртки
@@ -1596,7 +2419,23 @@ function frame(now) {
   g.save();
   g.translate(Math.round(sx), Math.round(sy));
   SCENES[director.genre].draw(director.scene, P, t - director.startedAt, dt);
-  g.restore();
+  // вывеска живёт в мире сцены и дрожит вместе с камерой; во время
+  // вступительной карточки её не видно, чтобы не спорить с титрами
+  if (t - director.startedAt > 5.4) {
+    const bp = director.brandPos;
+    brand(bp[0], bp[1], P, director.brandKind, (director.seed & 3) !== 0, t - director.startedAt);
+  }
+  drawWeather(P, t - director.startedAt, dt);
+  g.restore(); resetPaint();
+  // молния: короткая вспышка на весь кадр
+  if (P.time === 'гроза' && Math.random() < dt * 0.45) director.flash = 1;
+  if (director.flash > 0) {
+    director.flash = Math.max(0, director.flash - dt * 3.4);
+    g.globalAlpha = director.flash * 0.2;
+    paint(rgb([240, 244, 255]));
+    g.fillRect(0, 0, VW, VH);
+    g.globalAlpha = 1;
+  }
   drawFrameOverlay(P, t);
   drawHud(P, t);
   drawTitleCard(P, t);
