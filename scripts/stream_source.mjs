@@ -30,9 +30,12 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
   return [k, v ?? true];
 }));
 
-const W = Number(args.width || 1280);
-const H = Number(args.height || 720);
-const FPS = Number(args.fps || 30);
+const W = Number(args.width || 960);
+const H = Number(args.height || 540);
+// Кадры рисуются реже, чем идёт эфир: растеризация пейзажа в Skia стоит
+// десятки миллисекунд на кадр, и 30 fps в 720p два ядра не тянут. FFmpeg
+// сам доберёт кадры до 30 и растянет картинку до нужного разрешения.
+const FPS = Number(args.fps || 20);
 const PORT = Number(args.port || 0);      // 0 — порт выберет система
 const SR = 44100;
 const SAMPLES_PER_FRAME = SR / FPS;
@@ -53,7 +56,6 @@ const videoCode = blocks.at(-1)[1];
 
 const canvas = createCanvas(W, H);
 canvas.style = {};                       // страница выставляет размер через CSS
-const ctx = canvas.getContext('2d');
 let pendingFrame = null;
 let clockMs = 0;
 
@@ -137,93 +139,136 @@ function renderAudio(frames) {
 }
 
 // ============================================================
-//  ЭМИССИЯ: один кадр видео + ровно один кадр аудио на такт
-//  Оба потока уходят по localhost-сокетам, а не через stdin: у FFmpeg только
-//  один stdin, а запись в трубу на Windows ещё и синхронная — связка встаёт.
-//  Порядок такой: FFmpeg открывает и пробует первый вход, потом второй,
-//  поэтому видео льём сразу, а звук копим до его подключения.
+//  ЭМИССИЯ: видео и звук идут независимо, каждый по своим часам.
+//
+//  Связывать их одним циклом нельзя. Кадр 1280x720 в RGBA — это 3.5 МБ,
+//  он мигом забивает сокет, и write() отдаёт false. Если после этого
+//  остановить весь цикл, то звук тоже встанет, а FFmpeg в это время
+//  открывает второй вход и ждёт оттуда пакеты, не читая первый. Оба ждут
+//  друг друга — эфир не доходит до YouTube вообще.
+//
+//  Поэтому: один таймер, но два независимых счётчика по wall clock.
+//  Отставание каждого потока своё и на соседа не влияет.
 // ============================================================
+const FRAME_BYTES = W * H * 4;
+const TICK_MS = 4;
+// Потолок буфера видео: выше — кадры пропускаем, чтобы не съесть память.
+const MAX_BUFFERED_FRAMES = 15;
+const AUDIO_BURST = SAMPLES_PER_FRAME * 4;
+
 let videoSocket = null;
 let audioSocket = null;
-let sent = 0;
-let startedAt = 0;
-let videoBusy = false;
-let audioBusy = false;
+let videoStartedAt = 0;
+let audioStartedAt = 0;
+let sentFrames = 0;
+let sentSamples = 0;
+let droppedFrames = 0;
 let lastReport = 0;
-let behind = 0;
+let ticks = 0;
+let videoMs = 0;
+let audioMs = 0;
 
 const audioQueue = [];
 let queuedBytes = 0;
-const QUEUE_LIMIT = 64 * 1024 * 1024;
+const QUEUE_LIMIT = 16 * 1024 * 1024;
 
-const scheduleAt = (frameIndex) => {
-  const wait = startedAt + frameIndex * FRAME_MS - Date.now();
-  if (wait > 1) setTimeout(tick, wait);
-  else { behind++; setImmediate(tick); }
-};
-const maybeRun = () => { if (!videoBusy && !audioBusy) scheduleAt(sent + 1); };
+function emitVideo(now) {
+  const want = Math.floor((now - videoStartedAt) * FPS / 1000);
+  // Не больше трёх кадров за тик: длинный догон заблокировал бы цикл
+  // событий и снова заморил бы звук.
+  const limit = Math.min(want, sentFrames + 3);
+  while (sentFrames < limit) {
+    const cb = pendingFrame;
+    pendingFrame = null;
+    cb(clockMs);                       // нарисовать следующий кадр пейзажа
+    clockMs += FRAME_MS;
+    sentFrames++;
+
+    if (videoSocket.writableLength > MAX_BUFFERED_FRAMES * FRAME_BYTES) {
+      droppedFrames++;                 // сокет забит — кадр пропускаем
+      continue;
+    }
+    // canvas.data() отдаёт ту же память, которую Skia перезапишет следующим
+    // кадром, поэтому копируем: сокет пишет асинхронно, и без копии в очередь
+    // уйдёт уже испорченный кадр. getImageData() тут не годится — он втрое
+    // дороже бюджета кадра.
+    videoSocket.write(Buffer.from(canvas.data()));
+  }
+}
+
+function emitAudio(now) {
+  const want = Math.min(
+    Math.floor((now - audioStartedAt) * SR / 1000),
+    sentSamples + AUDIO_BURST,
+  );
+  if (want <= sentSamples) return;
+
+  const chunk = renderAudio(want - sentSamples);
+  sentSamples = want;
+  globalThis.currentTime = sentSamples / SR;
+
+  if (audioSocket) {
+    audioSocket.write(chunk);
+  } else if (queuedBytes + chunk.length <= QUEUE_LIMIT) {
+    audioQueue.push(chunk);
+    queuedBytes += chunk.length;
+  }
+}
 
 function tick() {
-  if (!videoSocket) return;
-  clockMs += FRAME_MS;
-  const cb = pendingFrame;
-  pendingFrame = null;
-  cb(clockMs);                                  // нарисовать следующий кадр
+  const t0 = Date.now();
+  if (videoSocket) emitVideo(t0);
+  const t1 = Date.now();
+  if (audioStartedAt) emitAudio(t1);
+  const t2 = Date.now();
+  ticks++;
+  videoMs += t1 - t0;
+  audioMs += t2 - t1;
+  const now = t2;
 
-  const pixels = ctx.getImageData(0, 0, W, H).data;
-  const frame = Buffer.from(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-  const audio = renderAudio(SAMPLES_PER_FRAME);
-  sent++;
-
-  videoBusy = videoSocket.write(frame) === false;
-  if (audioSocket) {
-    audioBusy = audioSocket.write(audio) === false;
-  } else if (queuedBytes + audio.length <= QUEUE_LIMIT) {
-    audioQueue.push(audio);
-    queuedBytes += audio.length;
-  }
-
-  const now = Date.now();
-  if (now - lastReport >= 30000) {
+  if (now - lastReport >= 60000) {
+    const span = now - lastReport;
     lastReport = now;
-    const real = (now - startedAt) / 1000;
+    const videoReal = videoStartedAt ? (now - videoStartedAt) / 1000 : 0;
+    const audioReal = audioStartedAt ? (now - audioStartedAt) / 1000 : 0;
     process.stderr.write(
-      `source: ${sent} кадров за ${real.toFixed(0)} с (${(sent / real).toFixed(1)} fps), `
-      + `отставаний ${behind}, трек ${generator.kitName ?? '?'} `
-      + `${generator.bpm ?? '?'} bpm ${generator.keyName ?? '?'} ${generator.scaleName ?? ''}\n`,
+      `source: тиков ${ticks} за ${(span / 1000).toFixed(0)} с, `
+      + `видео ${videoMs} мс, звук ${audioMs} мс, `
+      + `кадров ${sentFrames}/${(videoReal * FPS).toFixed(0)} (пропущено ${droppedFrames}), `
+      + `звук ${(sentSamples / SR).toFixed(1)} из ${audioReal.toFixed(1)} с, `
+      + `в буфере ${(videoSocket ? videoSocket.writableLength / 1048576 : 0).toFixed(0)} МБ, `
+      + `трек ${generator.kitName ?? '?'} ${generator.bpm ?? '?'} bpm\n`,
     );
+    ticks = 0; videoMs = 0; audioMs = 0;
   }
-  maybeRun();
+  setTimeout(tick, TICK_MS);
 }
 
 const videoServer = net.createServer((conn) => {
   if (videoSocket) { conn.destroy(); return; }
   conn.setNoDelay(true);
   videoSocket = conn;
-  conn.on('drain', () => { videoBusy = false; maybeRun(); });
   conn.on('error', () => {});
   conn.on('close', () => process.exit(0));
+  videoStartedAt = Date.now();
+  lastReport = videoStartedAt;
   process.stderr.write(`source: видео подключено, рисую ${W}x${H}@${FPS} (seed ${SEED})\n`);
-  startedAt = Date.now();
-  lastReport = startedAt;
-  tick();
 });
 
 const audioServer = net.createServer((conn) => {
   if (audioSocket) { conn.destroy(); return; }
   conn.setNoDelay(true);
   audioSocket = conn;
-  conn.on('drain', () => { audioBusy = false; maybeRun(); });
   conn.on('error', () => {});
   conn.on('close', () => process.exit(0));
-  for (const chunk of audioQueue) {
-    if (conn.write(chunk) === false) audioBusy = true;
-  }
+  for (const chunk of audioQueue) conn.write(chunk);
   const caught = queuedBytes / (SR * 8);
   audioQueue.length = 0;
   queuedBytes = 0;
+  // Часы звука стартуют от момента подключения: FFmpeg открывает входы
+  // по очереди, и это расхождение в доли секунды — норма.
+  audioStartedAt = Date.now();
   process.stderr.write(`source: звук подключён, отдал очередь ${caught.toFixed(2)} с\n`);
-  maybeRun();
 });
 
 const failSocket = (what) => (e) => fail(`сокет ${what}: ${e.message}`);
@@ -234,6 +279,7 @@ let opened = 0;
 const announce = () => {
   if (++opened === 2) {
     process.stderr.write(`ready ${videoServer.address().port} ${audioServer.address().port}\n`);
+    tick();
   }
 };
 videoServer.listen(0, '127.0.0.1', announce);
