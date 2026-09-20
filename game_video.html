@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Lo-Fi Games</title>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+"use strict";
+/* =============================================================
+   LO-FI GAMES · процедурный «демо-диск» вымышленных игр
+
+   Мир рисуется в маленьком канвасе 320x180 как пиксель-арт и
+   растягивается на весь экран целым числом без сглаживания.
+   Это и стиль (хрустящие пиксели), и экономия: растеризуем
+   в 16 раз меньше пикселей, чем при рисовании в 720p напрямую.
+
+   Сцены меняются вместе с музыкой: радио сообщает настроение
+   трека через globalThis.getMusicState(), режиссёр выбирает по
+   нему жанр и строит сцену из нового зерна — поэтому двух
+   одинаковых игр не будет.
+
+   Автономный запуск в браузере тоже работает: если музыки нет,
+   сцены сменяются по таймеру.
+   ============================================================= */
+
+const VW = 320, VH = 180;              // виртуальный экран
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const OUT_W = canvas.width, OUT_H = canvas.height;
+const SCALE = Math.max(1, Math.min(Math.floor(OUT_W / VW), Math.floor(OUT_H / VH)));
+const OFF_X = ((OUT_W - VW * SCALE) / 2) | 0;
+const OFF_Y = ((OUT_H - VH * SCALE) / 2) | 0;
+
+const world = document.createElement('canvas');
+world.width = VW; world.height = VH;
+const g = world.getContext('2d');
+try { ctx.imageSmoothingEnabled = false; g.imageSmoothingEnabled = false; } catch (e) {}
+
+// ---------------------------------------------------------------- случайность
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rndRange = (r, a, b) => a + r() * (b - a);
+const rndInt = (r, a, b) => Math.floor(a + r() * (b - a + 1));
+const pick = (r, arr) => arr[Math.floor(r() * arr.length) % arr.length];
+
+// Гладкий шум по одному измерению: им строим холмы, дюны, силуэты.
+function hash1(n) {
+  n = (n << 13) ^ n;
+  const m = (n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff;
+  return 1 - m / 1073741824;
+}
+function smooth(x) { return x * x * (3 - 2 * x); }
+function noise1(x) {
+  const i = Math.floor(x), f = x - i;
+  return hash1(i) + (hash1(i + 1) - hash1(i)) * smooth(f);
+}
+function ridge(x, freq, oct) {
+  let sum = 0, amp = 1, f = freq, norm = 0;
+  for (let i = 0; i < oct; i++) { sum += amp * noise1(x * f); norm += amp; amp *= 0.5; f *= 2; }
+  return sum / norm;
+}
+
+// ---------------------------------------------------------------- палитра
+// Всё приглушённое и тёплое: никаких чистых и ярких цветов, как в лофи.
+const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+function mix(a, b, k) {
+  return [Math.round(a[0] + (b[0] - a[0]) * k),
+          Math.round(a[1] + (b[1] - a[1]) * k),
+          Math.round(a[2] + (b[2] - a[2]) * k)];
+}
+const TIMES = [
+  { name: 'рассвет', sky: [[62, 60, 86], [122, 96, 108], [186, 138, 118]], sun: [226, 190, 156], glow: [198, 142, 112], ink: [30, 26, 40], light: 205 },
+  { name: 'день',   sky: [[96, 112, 136], [132, 146, 162], [176, 176, 168]], sun: [226, 220, 196], glow: [196, 186, 164], ink: [38, 40, 46], light: 220 },
+  { name: 'закат',  sky: [[58, 52, 78], [140, 92, 96], [206, 146, 112]], sun: [232, 190, 148], glow: [208, 136, 104], ink: [26, 22, 36], light: 215 },
+  { name: 'ночь',   sky: [[20, 22, 38], [32, 32, 52], [58, 50, 74]], sun: [190, 194, 206], glow: [140, 140, 168], ink: [10, 10, 20], light: 120 },
+  { name: 'туман',  sky: [[86, 88, 96], [110, 110, 116], [140, 138, 138]], sun: [204, 198, 186], glow: [172, 170, 166], ink: [46, 46, 52], light: 180 },
+  { name: 'гроза',  sky: [[40, 42, 56], [58, 58, 74], [86, 82, 92]], sun: [176, 176, 186], glow: [140, 138, 152], ink: [18, 18, 28], light: 140 },
+];
+function makePalette(r, genre) {
+  const time = TIMES[Math.floor(r() * TIMES.length) % TIMES.length];
+  const tint = GENRES[genre].tint;
+  const k = 0.22 + r() * 0.2;                     // насколько сильно жанр красит сцену
+  const sky = time.sky.map((c) => mix(c, tint, k));
+  const ink = mix(time.ink, tint, k * 0.5);
+  return {
+    time: time.name,
+    sky,
+    sun: mix(time.sun, tint, k * 0.5),
+    glow: mix(time.glow, tint, k * 0.6),
+    ink,
+    light: time.light,
+    accent: mix(tint, [255, 236, 220], 0.25 + r() * 0.15),
+    fog: mix(sky[1], [180, 178, 176], 0.35),
+    fogAmt: 0.25 + r() * 0.35,
+  };
+}
+
+// ---------------------------------------------------------------- шрифт 5x7
+// Свой битмапный шрифт: системный при растяжке в 4 раза превратился бы
+// в мыло, а пиксельные буквы держат стиль.
+const GLYPHS = {
+  A: [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  B: [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+  C: [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
+  D: [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+  E: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+  F: [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+  G: [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
+  H: [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+  I: [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  J: [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
+  K: [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+  L: [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+  M: [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+  N: [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+  O: [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  P: [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+  Q: [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+  R: [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+  S: [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+  T: [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+  U: [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+  V: [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
+  W: [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
+  X: [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+  Y: [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+  Z: [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+  0: [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+  1: [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+  2: [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+  3: [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
+  4: [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+  5: [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+  6: [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+  7: [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+  8: [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+  9: [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+  ' ': [0, 0, 0, 0, 0, 0, 0],
+  '-': [0, 0, 0, 0x0E, 0, 0, 0],
+  ':': [0, 0x04, 0x04, 0, 0x04, 0x04, 0],
+  '.': [0, 0, 0, 0, 0, 0x06, 0x06],
+  '!': [0x04, 0x04, 0x04, 0x04, 0x04, 0, 0x04],
+  '?': [0x0E, 0x11, 0x01, 0x02, 0x04, 0, 0x04],
+  "'": [0x04, 0x04, 0, 0, 0, 0, 0],
+  '+': [0, 0x04, 0x04, 0x1F, 0x04, 0x04, 0],
+  '/': [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
+};
+function text(str, x, y, color, scale, spacing) {
+  const sp = spacing === undefined ? 1 : spacing;
+  let cx = x;
+  g.fillStyle = color;
+  for (const ch of str.toUpperCase()) {
+    const rows = GLYPHS[ch];
+    if (rows) {
+      for (let row = 0; row < 7; row++) {
+        const bits = rows[row];
+        if (!bits) continue;
+        for (let col = 0; col < 5; col++) {
+          if (bits & (1 << (4 - col))) {
+            g.fillRect(cx + col * scale, y + row * scale, scale, scale);
+          }
+        }
+      }
+    }
+    cx += (5 + sp) * scale;
+  }
+  return cx - x;
+}
+const textWidth = (str, scale, spacing) =>
+  str.length * ((5 + (spacing === undefined ? 1 : spacing)) * scale) - (spacing === undefined ? 1 : spacing) * scale;
+function textCentered(str, y, color, scale) {
+  text(str, ((VW - textWidth(str, scale)) / 2) | 0, y, color, scale);
+}
+
+// ---------------------------------------------------------------- мелочи
+const rect = (x, y, w, h, c) => { g.fillStyle = c; g.fillRect(x | 0, y | 0, w | 0, h | 0); };
+function bandGradient(y0, y1, colors) {         // небо полосами с дизерингом
+  const steps = colors.length - 1;
+  const h = Math.max(1, Math.round((y1 - y0) / steps));
+  for (let i = 0; i < steps; i++) {
+    const y = y0 + i * h;
+    rect(0, y, VW, i === steps - 1 ? y1 - y : h, rgb(colors[i]));
+    // пиксельная растяжка между полосами
+    for (let d = 0; d < 3; d++) {
+      const yy = y + h - 3 + d;
+      if (yy >= y1) break;
+      for (let x = (d * 2) % 3; x < VW; x += 3) rect(x, yy, 1, 1, rgb(colors[i + 1] || colors[i]));
+    }
+  }
+}
+function silhouette(seed, baseY, amp, freq, color, step) {
+  g.fillStyle = color;
+  g.beginPath();
+  g.moveTo(0, VH);
+  const st = step || 2;
+  for (let x = 0; x <= VW; x += st) {
+    const y = baseY - (ridge(seed + x * freq, 1, 4) * 0.5 + 0.5) * amp;
+    g.lineTo(x, y | 0);
+  }
+  g.lineTo(VW, VH);
+  g.closePath();
+  g.fill();
+}
+function ditherFill(x, y, w, h, c, parity) {
+  g.fillStyle = c;
+  for (let yy = y; yy < y + h; yy++) {
+    for (let xx = x + ((yy + parity) % 2); xx < x + w; xx += 2) g.fillRect(xx, yy, 1, 1);
+  }
+}
+function glow(x, y, r, color, alpha) {
+  g.globalAlpha = alpha;
+  g.fillStyle = color;
+  ditherFill(x - r, y - r, r * 2, r * 2, color, 0);
+  g.globalAlpha = 1;
+}
+
+// ---------------------------------------------------------------- жанры
+const GENRES = {
+  platformer: { label: 'PLATFORMER', tint: [150, 132, 96] },
+  rpg:        { label: 'ROLE-PLAYING', tint: [140, 120, 92] },
+  space:      { label: 'SPACE SHOOTER', tint: [96, 104, 148] },
+  cyber:      { label: 'NEON NOIR', tint: [130, 84, 140] },
+  dungeon:    { label: 'DUNGEON CRAWLER', tint: [126, 104, 96] },
+  underwater: { label: 'DEEP DIVER', tint: [84, 118, 134] },
+  vapor:      { label: 'RETRO RACER', tint: [156, 108, 130] },
+  snow:       { label: 'WINTER JOURNEY', tint: [132, 138, 152] },
+  abstract:   { label: 'ART PROJECT', tint: [116, 108, 140] },
+};
+const GENRE_KEYS = Object.keys(GENRES);
+
+// --- платформер: холмы в три слоя, платформы, деревья, птицы
+function buildPlatformer(r, P) {
+  return {
+    layers: [0, 1, 2].map((i) => ({
+      speed: [3, 7, 13][i], base: [126, 142, 160][i], amp: [30, 22, 14][i],
+      freq: [0.010, 0.017, 0.028][i], seed: r() * 500,
+      color: mix(P.sky[2], P.ink, [0.35, 0.6, 0.82][i]),
+    })),
+    trees: Array.from({ length: 14 }, () => ({ x: r() * VW, h: rndRange(r, 10, 22), layer: r() < 0.5 ? 1 : 2 })),
+    clouds: Array.from({ length: 4 }, () => ({ x: r() * VW, y: rndRange(r, 16, 52), w: rndRange(r, 22, 46), s: rndRange(r, 1, 3) })),
+    birds: Array.from({ length: 3 }, () => ({ x: r() * VW, y: rndRange(r, 34, 60), s: rndRange(r, 1, 2), p: r() * 6 })),
+  };
+}
+function drawPlatformer(s, P, t) {
+  const clouds = s.clouds;
+  for (const c of clouds) {
+    const x = ((c.x + t * c.s) % (VW + 80) + VW + 80) % (VW + 80) - 40;
+    ditherFill(x, c.y, c.w, 5, rgba(P.light > 180 ? P.sky[2] : P.glow, 0.55), 0);
+    ditherFill(x + 5, c.y - 4, c.w - 12, 4, rgba(P.light > 180 ? P.sky[2] : P.glow, 0.45), 1);
+  }
+  for (const l of s.layers) {
+    const off = t * l.speed;
+    g.fillStyle = rgb(l.color);
+    g.beginPath();
+    g.moveTo(0, VH);
+    for (let x = 0; x <= VW; x += 2) {
+      const wx = ((x + off) % VW + VW) % VW;
+      const y = l.base - (ridge(l.seed + wx * l.freq, 1, 4) * 0.5 + 0.5) * l.amp;
+      g.lineTo(x, y | 0);
+    }
+    g.lineTo(VW, VH); g.closePath(); g.fill();
+    if (l.speed === 7) {
+      for (const tr of s.trees) {
+        if (tr.layer !== 1) continue;
+        const x = ((tr.x - off) % (VW + 20) + VW + 20) % (VW + 20) - 10;
+        const base = l.base + 4;
+        rect(x, base - tr.h, 2, tr.h, rgb(mix(l.color, P.ink, 0.35)));
+        rect(x - 3, base - tr.h, 8, 4, rgb(mix(l.color, P.ink, 0.2)));
+      }
+    }
+  }
+  for (const b of s.birds) {
+    const x = ((b.x + t * (6 + b.s * 2)) % (VW + 30) + VW + 30) % (VW + 30) - 15;
+    const flap = Math.sin(t * 6 + b.p) > 0;
+    const c = rgb(mix(P.ink, P.sky[1], 0.3));
+    rect(x, b.y, b.s * 3, 1, c);
+    rect(x - b.s, b.y + (flap ? -1 : 1), b.s, 1, c);
+    rect(x + b.s * 3, b.y + (flap ? -1 : 1), b.s, 1, c);
+  }
+}
+
+// --- RPG: вид сверху, деревня, фонари, дорожка, идущий герой
+function buildRpg(r, P) {
+  const houses = Array.from({ length: rndInt(r, 5, 7) }, (_, i) => ({
+    x: 20 + i * 40 + rndRange(r, -6, 6), y: rndRange(r, 46, 96),
+    w: rndInt(r, 22, 30), h: rndInt(r, 16, 22), roof: mix(P.accent, P.ink, rndRange(r, 0.35, 0.6)),
+    win: r() < 0.7,
+  }));
+  return {
+    houses,
+    trees: Array.from({ length: 22 }, () => ({ x: r() * VW, y: rndRange(r, 30, VH - 10), s: rndRange(r, 4, 8) })),
+    lamps: Array.from({ length: 5 }, (_, i) => ({ x: 14 + i * 62, y: 120 + rndRange(r, -6, 6), p: r() * 6 })),
+    walker: { x: 0, phase: 0 },
+  };
+}
+function drawRpg(s, P, t) {
+  rect(0, 0, VW, VH, rgb(mix(P.sky[1], P.ink, 0.45)));
+  for (let y = 30; y < VH; y += 3) {
+    for (let x = (y % 6 === 0 ? 0 : 1); x < VW; x += 3) rect(x, y, 1, 1, rgb(mix(P.sky[1], P.ink, 0.32)));
+  }
+  const roadY = 122;
+  ditherFill(0, roadY - 5, VW, 14, rgb(mix(P.sky[2], P.ink, 0.25)), 0);
+  rect(0, roadY - 1, VW, 1, rgb(mix(P.sky[2], P.ink, 0.12)));
+  for (const tr of s.trees) {
+    rect(tr.x - 1, tr.y - tr.s, 2, tr.s, rgb(mix(P.ink, P.sky[1], 0.25)));
+    const sway = Math.sin(t * 0.8 + tr.x) * 0.8;
+    rect(tr.x - tr.s * 0.5 + sway, tr.y - tr.s - 5, tr.s, 5, rgb(mix(P.ink, P.sky[1], 0.35)));
+  }
+  for (const h of s.houses) {
+    rect(h.x, h.y + 4, h.w, h.h, rgb(mix(P.sky[1], P.ink, 0.55)));
+    g.fillStyle = rgb(h.roof);
+    g.beginPath();
+    g.moveTo(h.x - 2, h.y + 6);
+    g.lineTo(h.x + h.w / 2, h.y - 4);
+    g.lineTo(h.x + h.w + 2, h.y + 6);
+    g.closePath(); g.fill();
+    rect(h.x + 3, h.y + h.h - 4, 1, 1, rgb(mix(P.ink, P.sky[1], 0.2)));
+    if (h.win) {
+      const warm = Math.sin(t * 1.7 + h.x) > 0 ? P.light : P.light * 0.7;
+      rect(h.x + 5, h.y + 10, 4, 4, rgba(mix(P.accent, [255, 214, 150], 0.6), warm > 170 ? 0.9 : 0.5));
+    }
+  }
+  for (const l of s.lamps) {
+    const flick = 0.6 + 0.4 * Math.abs(Math.sin(t * 3.1 + l.p));
+    glow(l.x, l.y - 12, 9, rgba(P.accent, 0.32 * flick), 1);
+    rect(l.x, l.y - 13, 1, 13, rgb(mix(P.ink, P.sky[1], 0.3)));
+    rect(l.x - 2, l.y - 15, 5, 3, rgb(mix(P.accent, [255, 224, 170], 0.5)));
+  }
+  s.walker.x = ((t * 7) % (VW + 40)) - 20;
+  const wy = roadY + 6;
+  const step = Math.floor(t * 6) % 2;
+  const body = rgb(mix(P.accent, P.ink, 0.25));
+  rect(s.walker.x, wy - 9, 4, 7, body);
+  rect(s.walker.x + 1, wy - 11, 3, 3, rgb(mix(P.sun, P.ink, 0.35)));
+  rect(s.walker.x + (step ? 0 : 1), wy - 2, 1, 2, rgb(mix(P.ink, body, 0.3)));
+  rect(s.walker.x + (step ? 3 : 2), wy - 2, 1, 2, rgb(mix(P.ink, body, 0.3)));
+}
+
+// --- космос: звёзды, планета с кольцом, астероиды, далёкий корабль
+function buildSpace(r, P) {
+  return {
+    stars: Array.from({ length: 90 }, () => ({
+      x: r() * VW, y: r() * VH, s: r() < 0.85 ? 1 : 2, p: r() * 6.28,
+      l: rndRange(r, 0.4, 1),
+    })),
+    dust: Array.from({ length: 26 }, () => ({ x: r() * VW, y: r() * VH, s: rndRange(r, 1, 3), v: rndRange(r, 2, 6) })),
+    rocks: Array.from({ length: 6 }, () => ({ x: r() * VW, y: r() * VH, s: rndRange(r, 3, 7), v: rndRange(r, 3, 9), sp: r() * 6 })),
+    planet: { x: rndRange(r, 190, 280), y: rndRange(r, 34, 62), rr: rndRange(r, 18, 26), ring: r() < 0.6 },
+    ship: { x: 0 },
+    meteor: { t: -10, x: 0, y: 0, active: false },
+  };
+}
+function drawSpace(s, P, t) {
+  rect(0, 0, VW, VH, rgb(mix(P.ink, P.sky[0], 0.25)));
+  // туманность
+  for (let i = 0; i < 3; i++) {
+    glow(60 + i * 80 + Math.sin(t * 0.1 + i) * 4, 50 + i * 22, 30, rgba(mix(P.glow, P.accent, 0.4), 0.05), 1);
+  }
+  for (const st of s.stars) {
+    const tw = 0.55 + 0.45 * Math.sin(t * 1.6 + st.p);
+    rect(st.x, st.y, st.s, st.s, rgba(mix(P.sun, P.accent, 0.3), st.l * tw));
+  }
+  for (const d of s.dust) {
+    const x = ((d.x + t * d.v) % (VW + 10) + VW + 10) % (VW + 10) - 5;
+    rect(x, d.y, d.s, 1, rgba(P.accent, 0.35));
+  }
+  const pl = s.planet;
+  if (pl.ring) {
+    g.globalAlpha = 0.35;
+    g.strokeStyle = rgb(mix(P.accent, P.ink, 0.2));
+    g.lineWidth = 2;
+    g.beginPath(); g.ellipse(pl.x, pl.y + 2, pl.rr * 1.65, pl.rr * 0.42, -0.35, 0, Math.PI * 2); g.stroke();
+    g.globalAlpha = 1;
+  }
+  const lit = mix(P.sun, P.accent, 0.15);
+  const dark = mix(P.ink, P.sky[0], 0.3);
+  for (let y = -pl.rr; y <= pl.rr; y++) {
+    const dx = Math.sqrt(Math.max(0, pl.rr * pl.rr - y * y)) | 0;
+    const k = 1 - (y + pl.rr) / (pl.rr * 2);
+    rect(pl.x - dx, pl.y + y, dx * 2, 1, rgb(mix(dark, lit, 0.25 + k * 0.7)));
+  }
+  rect(pl.x - pl.rr * 0.5, pl.y - pl.rr * 0.3, pl.rr, 2, rgba(dark, 0.5));
+  for (const rk of s.rocks) {
+    const x = ((rk.x - t * rk.v) % (VW + 20) + VW + 20) % (VW + 20) - 10;
+    const y = rk.y + Math.sin(t * 1.4 + rk.sp) * 2;
+    rect(x, y, rk.s, rk.s * 0.7, rgb(mix(P.ink, P.sky[1], 0.35)));
+    rect(x + 1, y + 1, rk.s - 2, 1, rgba(P.glow, 0.3));
+  }
+  if (!s.meteor.active && Math.random() < 0.0035) {
+    s.meteor.active = true; s.meteor.t = 0; s.meteor.x = 30 + Math.random() * 200; s.meteor.y = 10 + Math.random() * 40;
+  }
+  if (s.meteor.active) {
+    s.meteor.t += 1 / 30;
+    const m = s.meteor;
+    const x = m.x + m.t * 150, y = m.y + m.t * 80;
+    for (let i = 0; i < 12; i++) rect(x - i * 1.6, y - i * 0.85, 2, 1, rgba(P.accent, 0.6 - i * 0.05));
+    if (m.t > 1.6) m.active = false;
+  }
+  s.ship.x = ((t * 9) % (VW + 60)) - 30;
+  const sh = rgb(mix(P.ink, P.sky[1], 0.5));
+  rect(s.ship.x, 150, 7, 2, sh);
+  rect(s.ship.x + 7, 150, 2, 1, sh);
+  rect(s.ship.x - 2, 151, 2, 1, rgba(P.accent, 0.8));
+}
+
+// --- киберпанк: небоскрёбы, окна, неон, дождь, отражение в мокром асфальте
+function buildCyber(r, P) {
+  const mk = (base, hMin, hMax, count) => Array.from({ length: count }, (_, i) => ({
+    x: i * (VW / count) + rndRange(r, -4, 4), w: rndRange(r, 14, 26),
+    h: rndRange(r, hMin, hMax), base, seed: r(),
+  }));
+  return {
+    far: mk(118, 40, 70, 14), mid: mk(132, 30, 62, 11),
+    rain: Array.from({ length: 60 }, () => ({ x: r() * VW, y: r() * VH, v: rndRange(r, 90, 150), l: rndRange(r, 3, 7) })),
+    signs: Array.from({ length: 7 }, () => ({
+      x: r() * VW, y: rndRange(r, 70, 125), w: rndInt(r, 4, 9), p: r() * 6,
+      c: [P.accent, mix(P.glow, [255, 200, 220], 0.4), mix(P.accent, [180, 255, 240], 0.4)][rndInt(r, 0, 2)],
+    })),
+    car: { x: -20, y: 150, v: rndRange(r, 30, 55) },
+    lightning: { t: -20 },
+  };
+}
+function drawCyber(s, P, t) {
+  bandGradient(0, 120, [mix(P.sky[0], P.ink, 0.5), mix(P.sky[1], P.ink, 0.35), mix(P.sky[2], P.ink, 0.2)]);
+  const drawTowers = (list, dim, offset, lit) => {
+    for (const b of list) {
+      const x = ((b.x + offset) % (VW + 40) + VW + 40) % (VW + 40) - 20;
+      const top = b.base - b.h;
+      rect(x, top, b.w, b.h + 20, rgb(mix(P.ink, dim, 0.4)));
+      if (lit) {
+        for (let wy = top + 3; wy < b.base - 2; wy += 4) {
+          for (let wx = x + 2; wx < x + b.w - 2; wx += 3) {
+            if (hash1(b.seed * 1000 + wy * 7 + wx) > 0.35) {
+              const warm = hash1(wy * 3 + wx) > 0.2;
+              rect(wx, wy, 1, 2, rgba(warm ? mix(P.accent, [255, 210, 160], 0.5) : P.glow, 0.55));
+            }
+          }
+        }
+      }
+    }
+  };
+  drawTowers(s.far, mix(P.sky[1], P.ink, 0.6), -t * 1.5, false);
+  drawTowers(s.mid, mix(P.sky[1], P.ink, 0.35), -t * 4, true);
+  for (const sg of s.signs) {
+    const blink = Math.sin(t * 2.2 + sg.p) > -0.55;
+    if (!blink) continue;
+    const x = ((sg.x - t * 4) % (VW + 30) + VW + 30) % (VW + 30) - 15;
+    glow(x, sg.y, 10, rgba(sg.c, 0.22), 1);
+    rect(x, sg.y, sg.w, 3, rgba(sg.c, 0.9));
+    rect(x - 1, sg.y - 1, sg.w + 2, 5, rgba(sg.c, 0.25));
+  }
+  // мокрый асфальт
+  const streetY = 138;
+  rect(0, streetY, VW, VH - streetY, rgb(mix(P.ink, P.sky[0], 0.18)));
+  g.globalAlpha = 0.22;
+  g.save();
+  g.translate(0, streetY * 2);
+  g.scale(1, -1);
+  for (const b of s.mid) {
+    const x = ((b.x - t * 4) % (VW + 40) + VW + 40) % (VW + 40) - 20;
+    rect(x, b.base - b.h, b.w, b.h, rgb(mix(P.ink, P.sky[1], 0.3)));
+  }
+  g.restore();
+  g.globalAlpha = 1;
+  for (const sg of s.signs) {
+    const x = ((sg.x - t * 4) % (VW + 30) + VW + 30) % (VW + 30) - 15;
+    if (Math.sin(t * 2.2 + sg.p) > -0.55) rect(x, streetY + 2, sg.w, 1, rgba(sg.c, 0.35));
+  }
+  s.car.x += 1 / 30 * s.car.v;
+  if (s.car.x > VW + 30) s.car.x = -30;
+  rect(s.car.x, s.car.y, 8, 2, rgb(mix(P.ink, P.accent, 0.3)));
+  rect(s.car.x + 8, s.car.y, 2, 1, rgba(P.accent, 0.95));
+  rect(s.car.x - 2, s.car.y, 2, 1, rgba([255, 150, 130], 0.8));
+  for (const r of s.rain) {
+    r.y += r.v / 30;
+    if (r.y > VH) { r.y = -4; r.x = Math.random() * VW; }
+    rect(r.x, r.y, 1, r.l, rgba(P.glow, 0.35));
+  }
+  if (Math.random() < 0.0016) s.lightning.t = t;
+  if (t - s.lightning.t < 0.12) {
+    g.globalAlpha = 0.5; g.fillStyle = rgb(mix(P.sky[2], [255, 255, 255], 0.4));
+    g.fillRect(0, 0, VW, 120); g.globalAlpha = 1;
+  }
+}
+
+// --- подземелье: кладка, арки, факелы, капли, сундук
+function buildDungeon(r, P) {
+  return {
+    bricks: Array.from({ length: 26 * 12 }, (_, i) => ({
+      x: (i % 26) * 12 + ((Math.floor(i / 26) % 2) * 6), y: Math.floor(i / 26) * 12,
+      s: hash1(i * 7 + 3),
+    })),
+    torches: Array.from({ length: 3 }, (_, i) => ({ x: 52 + i * 108, y: 66, p: r() * 6 })),
+    drops: Array.from({ length: 6 }, () => ({ x: r() * VW, y: r() * VH, v: rndRange(r, 20, 50) })),
+    chest: { x: rndRange(r, 190, 250), y: 150 },
+  };
+}
+function drawDungeon(s, P, t) {
+  rect(0, 0, VW, VH, rgb(mix(P.ink, P.sky[0], 0.22)));
+  for (const b of s.bricks) {
+    const shade = 0.5 + b.s * 0.5;
+    rect(b.x, b.y, 11, 11, rgb(mix(P.ink, mix(P.sky[2], P.ink, 0.5), 0.25 + shade * 0.35)));
+    rect(b.x, b.y + 10, 11, 1, rgba(P.ink, 0.7));
+    rect(b.x + 10, b.y, 1, 11, rgba(P.ink, 0.5));
+  }
+  // арки
+  for (let i = 0; i < 2; i++) {
+    const ax = 96 + i * 120, aw = 26, ah = 46;
+    for (let y = 0; y < ah; y++) {
+      const k = y / ah;
+      const dx = Math.round(aw * (0.5 + 0.5 * Math.cos((1 - k) * Math.PI * 0.5)));
+      rect(ax - dx, 120 - ah + y, 3, 1, rgb(mix(P.ink, P.sky[1], 0.3)));
+      rect(ax + dx - 3, 120 - ah + y, 3, 1, rgb(mix(P.ink, P.sky[1], 0.3)));
+    }
+    rect(ax - aw, 118, aw * 2, 2, rgb(mix(P.ink, P.sky[1], 0.2)));
+  }
+  rect(0, 120, VW, VH - 120, rgb(mix(P.ink, P.sky[1], 0.2)));
+  for (const tt of s.torches) {
+    const fl = 0.55 + 0.45 * Math.abs(Math.sin(t * 9 + tt.p));
+    glow(tt.x, tt.y, 22, rgba(mix(P.accent, [255, 170, 90], 0.5), 0.18 * fl), 1);
+    rect(tt.x - 1, tt.y - 8, 2, 8, rgb(mix(P.ink, P.sky[1], 0.35)));
+    rect(tt.x - 1, tt.y - 12, 3, 4, rgba(mix(P.accent, [255, 210, 140], 0.6), fl));
+  }
+  for (const d of s.drops) {
+    d.y += d.v / 30;
+    if (d.y > 120) { d.y = 0; d.x = Math.random() * VW; }
+    rect(d.x, d.y, 1, 2, rgba(P.glow, 0.4));
+  }
+  const c = s.chest;
+  rect(c.x, c.y, 14, 9, rgb(mix(P.sky[1], P.ink, 0.5)));
+  rect(c.x, c.y - 1, 14, 3, rgb(mix(P.accent, P.ink, 0.45)));
+  rect(c.x + 6, c.y + 3, 2, 3, rgba(P.accent, 0.85));
+}
+
+// --- под водой: лучи, водоросли, пузыри, рыбы, дно
+function buildUnderwater(r, P) {
+  return {
+    weed: Array.from({ length: 16 }, () => ({ x: r() * VW, h: rndRange(r, 24, 60), p: r() * 6, w: rndRange(r, 1, 2) })),
+    fish: Array.from({ length: 5 }, () => ({ x: r() * VW, y: rndRange(r, 40, 120), v: rndRange(r, 6, 16), s: rndRange(r, 2, 4), p: r() * 6 })),
+    bubbles: Array.from({ length: 14 }, () => ({ x: r() * VW, y: r() * VH, v: rndRange(r, 8, 22), s: r() < 0.7 ? 1 : 2 })),
+    pebbles: Array.from({ length: 30 }, () => ({ x: r() * VW, y: VH - rndRange(r, 2, 12), s: rndRange(r, 1, 3) })),
+  };
+}
+function drawUnderwater(s, P, t) {
+  bandGradient(0, VH, [mix(P.sky[0], P.ink, 0.35), mix(P.sky[1], P.ink, 0.5), mix(P.ink, P.sky[0], 0.35)]);
+  g.save();
+  g.globalAlpha = 0.16;
+  for (let i = 0; i < 5; i++) {
+    const x = 30 + i * 66 + Math.sin(t * 0.25 + i) * 8;
+    for (let y = 0; y < 150; y += 2) {
+      const w = 9 + y * 0.14;
+      rect(x - w / 2 + Math.sin(y * 0.05 + t) * 3, y, w, 1, rgb(mix(P.glow, P.sun, 0.4)));
+    }
+  }
+  g.restore();
+  for (const w of s.weed) {
+    for (let y = 0; y < w.h; y++) {
+      const sway = Math.sin(t * 1.1 + w.p + y * 0.09) * (y / w.h) * 7;
+      rect(w.x + sway, VH - 8 - y, w.w, 1, rgb(mix(P.ink, mix(P.accent, P.glow, 0.4), 0.35 + y / w.h * 0.3)));
+    }
+  }
+  rect(0, VH - 9, VW, 9, rgb(mix(P.sky[2], P.ink, 0.55)));
+  for (const p of s.pebbles) rect(p.x, p.y, p.s, 1, rgb(mix(P.sky[2], P.ink, 0.4)));
+  for (const f of s.fish) {
+    f.x += f.v / 30;
+    if (f.x > VW + 12) { f.x = -12; f.y = 40 + Math.random() * 80; }
+    const body = rgb(mix(P.ink, P.accent, 0.35));
+    rect(f.x, f.y, f.s * 2, f.s, body);
+    rect(f.x - f.s, f.y + (Math.sin(t * 4 + f.p) > 0 ? 0 : 1), f.s, 1, body);
+  }
+  for (const b of s.bubbles) {
+    b.y -= b.v / 30;
+    if (b.y < -4) { b.y = VH + 2; b.x = Math.random() * VW; }
+    rect(b.x + Math.sin(b.y * 0.2) * 2, b.y, b.s, b.s, rgba(P.sun, 0.35));
+  }
+}
+
+// --- retro racer / vapor: сетка, солнце, пальмы, полосы VHS
+function buildVapor(r, P) {
+  return {
+    palms: Array.from({ length: 5 }, (_, i) => ({ x: 24 + i * 68 + rndRange(r, -10, 10), h: rndRange(r, 22, 38), p: r() * 6 })),
+    sunY: rndRange(r, 52, 74),
+    band: 0,
+  };
+}
+function drawVapor(s, P, t) {
+  bandGradient(0, 96, [mix(P.sky[0], P.ink, 0.25), mix(P.sky[1], P.accent, 0.25), mix(P.sky[2], P.accent, 0.35)]);
+  // солнце с полосами
+  const sx = 232, sy = s.sunY, r = 30;
+  for (let y = -r; y <= r; y++) {
+    const dx = Math.sqrt(Math.max(0, r * r - y * y)) | 0;
+    const cut = y > r * 0.25 && (y % 5 < 2);
+    if (cut) continue;
+    rect(sx - dx, sy + y, dx * 2, 1, rgb(mix(P.accent, [255, 210, 150], 0.45)));
+  }
+  glow(sx, sy, 42, rgba(mix(P.accent, [255, 180, 140], 0.4), 0.12), 1);
+  // дальние горы
+  silhouette(11, 96, 22, 0.012, rgb(mix(P.ink, P.sky[1], 0.4)), 2);
+  // сетка
+  const horizon = 96;
+  rect(0, horizon, VW, VH - horizon, rgb(mix(P.ink, P.sky[0], 0.3)));
+  g.strokeStyle = rgba(mix(P.accent, P.glow, 0.5), 0.45);
+  g.lineWidth = 1;
+  for (let i = -10; i <= 10; i++) {
+    g.beginPath();
+    g.moveTo(160 + i * 6, horizon);
+    g.lineTo(160 + i * 60, VH);
+    g.stroke();
+  }
+  const scroll = (t * 0.35) % 1;
+  for (let i = 0; i < 12; i++) {
+    const k = (i + scroll) / 12;
+    const y = horizon + Math.pow(k, 1.9) * (VH - horizon);
+    g.beginPath(); g.moveTo(0, y | 0); g.lineTo(VW, y | 0); g.stroke();
+  }
+  for (const p of s.palms) {
+    const sway = Math.sin(t * 0.9 + p.p) * 1.5;
+    for (let y = 0; y < p.h; y++) rect(p.x + sway * (y / p.h) * 0.6, 96 - y, 2, 1, rgb(mix(P.ink, P.accent, 0.25)));
+    for (let a = 0; a < 5; a++) {
+      const ang = Math.PI + a * 0.42;
+      for (let l = 0; l < 8; l++) {
+        rect(p.x + 1 + Math.cos(ang) * l, 96 - p.h + Math.sin(ang) * l * 0.5, 1, 1, rgb(mix(P.ink, P.accent, 0.3)));
+      }
+    }
+  }
+  s.band = (s.band + 0.4) % VH;
+  rect(0, s.band | 0, VW, 3, rgba(P.sun, 0.05));
+}
+
+// --- зима: снег, ели, дом с тёплым окном, дым
+function buildSnow(r, P) {
+  return {
+    trees: Array.from({ length: 16 }, () => ({ x: r() * VW, y: rndRange(r, 96, 138), h: rndRange(r, 16, 34) })),
+    snow: Array.from({ length: 70 }, () => ({ x: r() * VW, y: r() * VH, v: rndRange(r, 8, 22), d: rndRange(r, -6, 6), s: r() < 0.8 ? 1 : 2 })),
+    cabin: { x: 214, y: 116 },
+    smoke: Array.from({ length: 7 }, (_, i) => ({ p: i * 0.7 })),
+  };
+}
+function drawSnow(s, P, t) {
+  bandGradient(0, 120, [mix(P.sky[0], P.ink, 0.2), mix(P.sky[1], P.ink, 0.15), mix(P.sky[2], P.ink, 0.1)]);
+  glow(70, 60, 26, rgba(P.glow, 0.12), 1);
+  silhouette(3, 128, 26, 0.010, rgb(mix(P.sky[2], P.ink, 0.28)), 2);
+  silhouette(9, 150, 18, 0.015, rgb(mix(P.sky[2], P.ink, 0.12)), 2);
+  for (const tr of s.trees) {
+    const c = rgb(mix(P.ink, P.sky[2], 0.3));
+    for (let i = 0; i < 3; i++) {
+      const w = 11 - i * 3, y = tr.y - tr.h + i * (tr.h / 3.4);
+      g.fillStyle = c;
+      g.beginPath();
+      g.moveTo(tr.x, y);
+      g.lineTo(tr.x - w / 2, y + tr.h / 2.6);
+      g.lineTo(tr.x + w / 2, y + tr.h / 2.6);
+      g.closePath(); g.fill();
+    }
+    rect(tr.x - 1, tr.y, 2, 4, rgb(mix(P.ink, P.sky[1], 0.25)));
+    rect(tr.x - 3, tr.y - tr.h + 2, 6, 1, rgba(P.sun, 0.5));
+  }
+  const cb = s.cabin;
+  rect(cb.x, cb.y, 40, 22, rgb(mix(P.sky[1], P.ink, 0.45)));
+  g.fillStyle = rgb(mix(P.ink, P.sky[2], 0.4));
+  g.beginPath();
+  g.moveTo(cb.x - 4, cb.y + 1); g.lineTo(cb.x + 20, cb.y - 12); g.lineTo(cb.x + 44, cb.y + 1);
+  g.closePath(); g.fill();
+  rect(cb.x + 7, cb.y + 8, 7, 7, rgba(mix(P.accent, [255, 206, 140], 0.6), 0.92));
+  glow(cb.x + 10, cb.y + 11, 12, rgba(mix(P.accent, [255, 200, 130], 0.5), 0.2), 1);
+  rect(cb.x + 26, cb.y + 9, 6, 13, rgb(mix(P.ink, P.sky[1], 0.3)));
+  for (const sm of s.smoke) {
+    const ph = t * 0.4 + sm.p;
+    const y = cb.y - 14 - (ph % 5) * 6;
+    const x = cb.x + 30 + Math.sin(ph) * 5;
+    rect(x, y, 2 + (ph % 3), 2, rgba(P.sky[2], 0.22));
+  }
+  for (const f of s.snow) {
+    f.y += f.v / 30;
+    f.x += Math.sin(t * 0.6 + f.y * 0.05) * f.d * 0.02;
+    if (f.y > VH) { f.y = -2; f.x = Math.random() * VW; }
+    rect(f.x, f.y, f.s, f.s, rgba(P.sun, 0.75));
+  }
+}
+
+// --- абстрактная сцена: фигуры, орбиты, созвездия
+function buildAbstract(r, P) {
+  return {
+    shapes: Array.from({ length: 7 }, () => ({
+      x: r() * VW, y: r() * VH, s: rndRange(r, 6, 20), a: r() * 6.28, v: rndRange(r, 0.05, 0.24),
+      k: rndInt(r, 0, 2), p: r() * 6,
+    })),
+    nodes: Array.from({ length: 16 }, () => ({ x: r() * VW, y: r() * VH, p: r() * 6 })),
+  };
+}
+function drawAbstract(s, P, t) {
+  rect(0, 0, VW, VH, rgb(mix(P.ink, P.sky[0], 0.4)));
+  for (let y = 0; y < VH; y += 8) rect(0, y, VW, 1, rgba(P.sky[1], 0.05));
+  // созвездие
+  g.strokeStyle = rgba(P.glow, 0.28);
+  g.lineWidth = 1;
+  for (let i = 0; i < s.nodes.length; i++) {
+    const a = s.nodes[i];
+    const ax = a.x + Math.sin(t * 0.3 + a.p) * 4, ay = a.y + Math.cos(t * 0.25 + a.p) * 4;
+    for (let j = i + 1; j < s.nodes.length; j++) {
+      const b = s.nodes[j];
+      const bx = b.x + Math.sin(t * 0.3 + b.p) * 4, by = b.y + Math.cos(t * 0.25 + b.p) * 4;
+      if (Math.hypot(ax - bx, ay - by) < 42) { g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke(); }
+    }
+    rect(ax, ay, 1, 1, rgba(P.sun, 0.8));
+  }
+  for (const sh of s.shapes) {
+    sh.a += sh.v / 30;
+    const x = sh.x + Math.cos(sh.a) * 12, y = sh.y + Math.sin(sh.a * 1.3) * 8;
+    const c = rgba(mix(P.accent, P.glow, (Math.sin(t * 0.5 + sh.p) + 1) / 2), 0.5);
+    if (sh.k === 0) {
+      g.fillStyle = c; g.fillRect(x, y, sh.s, sh.s);
+      rect(x + 2, y + 2, sh.s - 4, sh.s - 4, rgb(mix(P.ink, P.sky[0], 0.4)));
+    } else if (sh.k === 1) {
+      g.fillStyle = c;
+      g.beginPath(); g.moveTo(x, y + sh.s); g.lineTo(x + sh.s / 2, y); g.lineTo(x + sh.s, y + sh.s);
+      g.closePath(); g.fill();
+    } else {
+      g.strokeStyle = c; g.lineWidth = 1;
+      g.beginPath(); g.arc(x, y, sh.s / 2, 0, Math.PI * 2); g.stroke();
+    }
+  }
+}
+
+const SCENES = {
+  platformer: { build: buildPlatformer, draw: drawPlatformer },
+  rpg: { build: buildRpg, draw: drawRpg },
+  space: { build: buildSpace, draw: drawSpace },
+  cyber: { build: buildCyber, draw: drawCyber },
+  dungeon: { build: buildDungeon, draw: drawDungeon },
+  underwater: { build: buildUnderwater, draw: drawUnderwater },
+  vapor: { build: buildVapor, draw: drawVapor },
+  snow: { build: buildSnow, draw: drawSnow },
+  abstract: { build: buildAbstract, draw: drawAbstract },
+};
+
+// ---------------------------------------------------------------- названия
+const TITLE_A = ['SHADOW', 'NEON', 'PALE', 'ASHEN', 'SILENT', 'DISTANT', 'HOLLOW', 'FADED',
+  'WINTER', 'MIDNIGHT', 'VELVET', 'PAPER', 'IRON', 'SOFT', 'QUIET', 'LONELY', 'AMBER', 'FROZEN'];
+const TITLE_B = {
+  platformer: ['HOP', 'LEAP', 'TRAIL', 'RUNNER', 'ROOFS'],
+  rpg: ['HAMLET', 'VALE', 'KEEPSAKE', 'LANTERN', 'HARVEST'],
+  space: ['ORBIT', 'DRIFT', 'VOYAGE', 'SIGNAL', 'STATION'],
+  cyber: ['VIGIL', 'DISTRICT', 'CIRCUIT', 'RAIN', 'SECTOR 9'],
+  dungeon: ['CRYPT', 'WARDEN', 'RELIC', 'DEPTHS', 'VAULT'],
+  underwater: ['TIDE', 'REEF', 'ABYSS', 'CURRENT', 'DEEP'],
+  vapor: ['MIRAGE', 'CASSETTE', 'HORIZON', 'PALM', 'HIGHWAY'],
+  snow: ['CABIN', 'FROST', 'PINES', 'EMBER', 'PASS'],
+  abstract: ['FORM', 'PULSE', 'GEOMETRY', 'SILENCE', 'ANGLE'],
+};
+const TITLE_C = ['', ' II', ' III', ' - DEMO', ' - CHAPTER ONE', ' [1994]', ' - REMASTERED', ' +'];
+function makeTitle(r, genre) {
+  return pick(r, TITLE_A) + ' ' + pick(r, TITLE_B[genre]) + pick(r, TITLE_C);
+}
+
+// ---------------------------------------------------------------- режиссёр
+// Настроение радио -> жанр. Если музыки нет, жанр берётся по кругу.
+const MOOD_GENRE = {
+  dusty: ['platformer', 'rpg', 'snow'],
+  jazzhop: ['rpg', 'platformer', 'vapor'],
+  chillhop: ['platformer', 'underwater', 'vapor'],
+  midnight: ['cyber', 'space', 'dungeon'],
+  ambient: ['space', 'underwater', 'abstract'],
+  experimental: ['abstract', 'cyber', 'underwater'],
+  'lofi-house': ['cyber', 'vapor', 'rpg'],
+  soul: ['rpg', 'cyber', 'vapor'],
+  bossa: ['vapor', 'underwater', 'platformer'],
+  piano: ['snow', 'rpg', 'abstract'],
+  dark: ['dungeon', 'cyber', 'space'],
+  trap: ['cyber', 'dungeon', 'abstract'],
+  dub: ['underwater', 'cyber', 'dungeon'],
+  vapor: ['vapor', 'abstract', 'space'],
+  chip: ['platformer', 'vapor', 'space'],
+  guitar: ['vapor', 'platformer', 'snow'],
+  strings: ['snow', 'dungeon', 'abstract'],
+  vocal: ['abstract', 'cyber', 'vapor'],
+  musicbox: ['rpg', 'snow', 'abstract'],
+  bedroom: ['rpg', 'platformer', 'cyber'],
+};
+
+const director = {
+  genre: null,
+  scene: null,
+  palette: null,
+  title: '',
+  seed: 0,
+  startedAt: 0,
+  track: -1,
+  score: 0,
+  nextAuto: 0,
+  fade: 1,          // 1 — чёрный экран, дальше проявляется
+  shot: 0,          // счётчик «взятых» кадров для счётчика очков
+};
+
+function newScene(genre, seed, now) {
+  const r = mulberry32(seed);
+  director.genre = genre;
+  director.seed = seed;
+  director.palette = makePalette(r, genre);
+  director.scene = SCENES[genre].build(r, director.palette);
+  director.title = makeTitle(r, genre);
+  director.startedAt = now;
+  director.fade = 1;
+  director.shot = 0;
+}
+
+function chooseGenre(track, mood, now) {
+  const r = mulberry32((director.seed + track * 7919 + 13) >>> 0);
+  const mapped = MOOD_GENRE[mood];
+  // Обычно жанр подсказан музыкой, но иногда режиссёр удивляет:
+  // иначе связка «трек - сцена» читается слишком предсказуемо.
+  let genre;
+  if (mapped && r() < 0.72) genre = pick(r, mapped);
+  else genre = pick(r, GENRE_KEYS);
+  if (genre === director.genre) {
+    const alt = GENRE_KEYS.filter((k) => k !== director.genre);
+    genre = pick(r, alt);
+  }
+  return genre;
+}
+
+function musicState() {
+  return typeof globalThis.getMusicState === 'function' ? globalThis.getMusicState() : null;
+}
+
+// ---------------------------------------------------------------- интерфейс
+function drawHud(P, t) {
+  const inScene = t - director.startedAt;
+  if (inScene < 6.5) return;                      // во время титров HUD не мешает
+  const ink = rgba(P.ink, 0.85);
+  const soft = rgba(mix(P.sun, P.accent, 0.4), 0.9);
+  // очки вверху слева, растут как в настоящей игре
+  text('SCORE ' + String(director.score).padStart(6, '0'), 6, 6, ink, 1);
+  text('LV ' + String(1 + (director.track & 0xff) % 9).padStart(2, '0'), 6, 15, soft, 1);
+  // «здоровье» справа
+  const hp = 3;
+  for (let i = 0; i < hp; i++) {
+    const x = VW - 8 - i * 8;
+    rect(x, 6, 5, 4, rgba(P.accent, 0.85));
+    rect(x + 1, 7, 3, 2, rgba(P.ink, 0.7));
+  }
+  if (director.genre === 'rpg') {                 // миникарта
+    rect(VW - 40, VH - 32, 34, 26, rgba(P.ink, 0.55));
+    rect(VW - 39, VH - 31, 32, 24, rgba(mix(P.sky[1], P.ink, 0.3), 0.6));
+    const blip = (Math.sin(t * 0.4) * 0.5 + 0.5);
+    rect(VW - 39 + blip * 30, VH - 31 + ((t * 3) % 22), 2, 2, rgba(P.accent, 0.95));
+  }
+  if (director.genre === 'platformer') {          // полоска прогресса уровня
+    rect(6, VH - 9, 60, 3, rgba(P.ink, 0.6));
+    rect(6, VH - 9, 60 * ((t - director.startedAt) % 30) / 30, 3, rgba(P.accent, 0.8));
+  }
+}
+
+function drawTitleCard(P, t) {
+  const inScene = t - director.startedAt;
+  const showFor = 6.5;
+  if (inScene > showFor) return;
+  const k = Math.min(1, inScene / 0.6) * Math.min(1, (showFor - inScene) / 0.8);
+  g.globalAlpha = Math.max(0, Math.min(1, k));
+  // кинематографичные полосы
+  rect(0, 0, VW, 16, rgb([0, 0, 0]));
+  rect(0, VH - 16, VW, 16, rgb([0, 0, 0]));
+  const label = GENRES[director.genre].label;
+  textCentered(label, 60, rgba(P.sun, 0.75), 1);
+  textCentered(director.title, 74, rgba(P.sun, 0.98), 2);
+  textCentered('1 PLAYER   PRESS START', 112, rgba(mix(P.sun, P.accent, 0.3), 0.8), 1);
+  const dots = '.'.repeat(1 + (Math.floor(t * 2) % 3));
+  textCentered('LOADING' + dots, VH - 30, rgba(P.sun, 0.6), 1);
+  g.globalAlpha = 1;
+}
+
+function drawFrameOverlay(P, t) {
+  // виньетка и мягкий тёплый свет — общий лофи-слой поверх любой сцены
+  const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.35, VW / 2, VH / 2, VH * 1.05);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(10,8,14,0.55)');
+  g.fillStyle = vg; g.fillRect(0, 0, VW, VH);
+  g.globalAlpha = 0.05 + 0.02 * Math.sin(t * 0.7);
+  g.fillStyle = rgb(mix(P.accent, P.sun, 0.5));
+  g.fillRect(0, 0, VW, VH);
+  g.globalAlpha = 1;
+  // строки развёртки
+  for (let y = 0; y < VH; y += 3) rect(0, y, VW, 1, 'rgba(0,0,0,0.07)');
+}
+
+// ---------------------------------------------------------------- цикл
+let last = 0;
+function frame(now) {
+  let t = now / 1000;
+  const dt = Math.min(0.1, Math.max(0, t - last));
+  last = t;
+
+  const music = musicState();
+  const track = music && typeof music.track === 'number' ? music.track : Math.floor(t / 75);
+  if (track !== director.track || !director.scene) {
+    const mood = music && music.mood ? music.mood : null;
+    const seed = ((track + 1) * 2654435761 + Math.floor(t)) >>> 0;
+    newScene(chooseGenre(track, mood, t), seed, t);
+    director.track = track;
+  }
+
+  director.score += dt * (12 + Math.floor(Math.abs(Math.sin(t * 0.3)) * 30));
+  director.fade = Math.max(0, director.fade - dt * 1.4);
+
+  const P = director.palette;
+  SCENES[director.genre].draw(director.scene, P, t - director.startedAt);
+  drawFrameOverlay(P, t);
+  drawHud(P, t);
+  drawTitleCard(P, t);
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, OUT_W, OUT_H);
+  ctx.drawImage(world, OFF_X, OFF_Y, VW * SCALE, VH * SCALE);
+  if (director.fade > 0) {
+    ctx.fillStyle = `rgba(0,0,0,${director.fade})`;
+    ctx.fillRect(0, 0, OUT_W, OUT_H);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

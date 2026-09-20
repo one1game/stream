@@ -8,9 +8,9 @@ on:
         required: false
         default: "348"
       quality:
-        description: "light — экономно (854x480), normal — сбалансированно (1280x720), high — максимум качества (тяжелее, может не удержать 30 fps)"
+        description: "light — 960x540, normal — 1280x720, high — 1920x1080 (на бесплатном раннере может не удержать 30 fps)"
         required: false
-        default: "light"
+        default: "normal"
 
 permissions:
   contents: read

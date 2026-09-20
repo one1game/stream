@@ -47,12 +47,18 @@ const fail = (msg) => { process.stderr.write(`stream_source: ${msg}\n`); process
 // ============================================================
 //  ВИДЕО: reneratorvideo.html на Skia-канвасе
 // ============================================================
-const videoFile = path.join(ROOT, args.video || 'reneratorvideo.html');
+const videoFile = path.join(ROOT, args.video || 'game_video.html');
 if (!fs.existsSync(videoFile)) fail(`нет файла ${videoFile}`);
 
+// Сцену рисует обычная страница: исполняем её inline-скрипт на Skia-канвасе.
 const blocks = [...fs.readFileSync(videoFile, 'utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)];
 if (!blocks.length) fail(`в ${videoFile} нет inline-скрипта`);
 const videoCode = blocks.at(-1)[1];
+
+// Состояние музыки для режиссёра сцены: генератор игр читает его через
+// globalThis.getMusicState() и по нему выбирает жанр следующей сцены.
+const musicState = { mood: null, bpm: null, kit: null, key: null, scale: null, track: 0 };
+globalThis.getMusicState = () => musicState;
 
 const canvas = createCanvas(W, H);
 canvas.style = {};                       // страница выставляет размер через CSS
@@ -104,6 +110,21 @@ const generator = new registry['lofi-processor']({
   processorOptions: { seed: SEED, autoStart: true, mood: args.mood || undefined },
 });
 const mastering = new registry['mastering-processor']();
+
+// Смена трека — это вызов mkSession из restartTrack. Считаем их, чтобы сцена
+// менялась ровно тогда, когда радио начинает новый трек.
+let trackCount = 1;
+const baseMkSession = generator.mkSession.bind(generator);
+generator.mkSession = () => { trackCount++; return baseMkSession(); };
+const syncMusicState = () => {
+  musicState.mood = generator.mood ? generator.mood.name : null;
+  musicState.bpm = generator.bpm ?? null;
+  musicState.kit = generator.kitName ?? null;
+  musicState.key = generator.keyName ?? null;
+  musicState.scale = generator.scaleName ?? null;
+  musicState.track = trackCount;
+};
+syncMusicState();
 
 const blockL = new Float32Array(128);
 const blockR = new Float32Array(128);
@@ -206,6 +227,7 @@ function emitAudio(now) {
   const chunk = renderAudio(want - sentSamples);
   sentSamples = want;
   globalThis.currentTime = sentSamples / SR;
+  syncMusicState();                 // трек мог смениться во время рендера
 
   if (audioSocket) {
     audioSocket.write(chunk);
