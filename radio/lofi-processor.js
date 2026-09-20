@@ -120,28 +120,30 @@ const VOICES = {
   // «Тёмное» семейство (клавиши, гитара, чап) держит всю lo-fi палитру, поэтому
   // именно ему нужна верхняя середина: раньше h3/h5 были почти нулевые, и всё
   // выше 2 кГц приходилось вытягивать мастеру — а ему уже нечего было поднимать.
-  rhodes:  { type:'fm',   ratio:2.0,  index:2.0, modDecay:1.2, trem:5.2, tremDepth:0.18, attack:0.012, release:0.9, lp:8600 },
-  wurli:   { type:'fm',   ratio:3.0,  index:1.5, modDecay:2.0, trem:6.4, tremDepth:0.26, attack:0.010, release:0.7, lp:7600 },
+  rhodes:  { type:'fm',   ratio:2.0,  index:2.0, modDecay:1.2, trem:5.2, tremDepth:0.18, attack:0.012, release:0.9, lp:7200 },
+  wurli:   { type:'fm',   ratio:3.0,  index:1.5, modDecay:2.0, trem:6.4, tremDepth:0.26, attack:0.010, release:0.7, lp:6400 },
   // Индекс у колокольчика был 2.6 при срезе 9 кГц: звон стоял выше всей
-  // палитры и на длинных нотах бил по ушам. Тембр тот же, но скромнее.
-  bell:    { type:'fm',   ratio:3.51, index:1.9, modDecay:1.1, attack:0.005, release:1.6, lp:6800 },
-  keys:    { type:'add',  h2:0.28, h3:0.22, h5:0.07, h7:0.06, hDecay:0.8, attack:0.008, release:0.8, lp:8600 },
-  pluck:   { type:'add',  h2:0.50, h3:0.24, h5:0.09, h7:0.05, hDecay:4.5, attack:0.004, release:0.5, lp:8000 },
-  organ:   { type:'add',  h2:0.05, h3:0.50, h5:0.22, attack:0.05, release:0.6, lp:6000 },
-  saw:     { type:'saw',  attack:0.55, release:1.5, detune:10, lp:3400 },
-  soft:    { type:'add',  h2:0.20, h3:0.14, h7:0.05, attack:0.35, release:1.2, lp:5600 },
+  // палитры и на длинных нотах бил по ушам. Индекс 1.9 и срез 6.8 к всё ещё
+  // оставляли его самым ярким голосом (замер: у ambient/dark/vapor полоса
+  // 2–6 кГц выше остальных на 8–9 дБ). Тембр тот же, но теперь он в палитре.
+  bell:    { type:'fm',   ratio:3.51, index:1.15, modDecay:1.1, attack:0.005, release:1.6, lp:4700 },
+  keys:    { type:'add',  h2:0.28, h3:0.22, h5:0.07, h7:0.04, hDecay:0.8, attack:0.008, release:0.8, lp:7200 },
+  pluck:   { type:'add',  h2:0.50, h3:0.24, h5:0.09, h7:0.035, hDecay:4.5, attack:0.004, release:0.5, lp:6800 },
+  organ:   { type:'add',  h2:0.05, h3:0.50, h5:0.22, attack:0.05, release:0.6, lp:5200 },
+  saw:     { type:'saw',  attack:0.55, release:1.5, detune:10, lp:2600 },
+  soft:    { type:'add',  h2:0.20, h3:0.14, h7:0.05, attack:0.35, release:1.2, lp:5000 },
   tone:    { type:'add',  h2:0.35, h3:0.10, attack:0.010, release:0.1, lp:4000 },
   snareTone:{ type:'add', h2:0.06, h3:0.00, attack:0.002, release:0.12, lp:3000 },
   sub:     { type:'add',  h2:0.00, h3:0.00, attack:0.012, release:0.45, lp:900 },
   upright: { type:'add',  h2:0.22, h3:0.05, hDecay:3.0, attack:0.012, release:0.5, lp:1200 },
   elbass:  { type:'saw',  attack:0.012, release:0.35, detune:4, lp:420 },
   // Гитарная и «хрустальная» группа: щипок с быстрым спадом гармоник
-  nylon:   { type:'add',  h2:0.46, h3:0.26, h5:0.09, h7:0.07, hDecay:5.5, attack:0.006, release:0.45, lp:6400 },
-  kalimba: { type:'add',  h2:0.40, h3:0.16, h5:0.06, h7:0.02, hDecay:7.5, attack:0.003, release:0.30, lp:5400 },
+  nylon:   { type:'add',  h2:0.46, h3:0.26, h5:0.09, h7:0.05, hDecay:5.5, attack:0.006, release:0.45, lp:5400 },
+  kalimba: { type:'add',  h2:0.40, h3:0.16, h5:0.06, h7:0.02, hDecay:7.5, attack:0.003, release:0.30, lp:4700 },
   // Струнный ансамбль: пила с медленной атакой и расстройкой (ширину даёт второй голос)
-  strings: { type:'saw',  attack:0.42, release:1.7, lp:2600 },
+  strings: { type:'saw',  attack:0.42, release:1.7, lp:1500 },
   // Вокальный чап: форманта из h2/h3 через низкий срез + вибрато
-  voice:   { type:'add',  h2:0.60, h3:0.34, h5:0.10, h7:0.05, attack:0.060, release:0.55, lp:2300,
+  voice:   { type:'add',  h2:0.60, h3:0.34, h5:0.10, h7:0.04, attack:0.060, release:0.55, lp:2300,
                          vib:5.0, vibDepth:9 },
 };
 
@@ -459,6 +461,7 @@ class Voice {
     this.vibPhase = 0;
     this.vibCents = 0;
     this.lpState = 0;
+    this.lpState2 = 0;
     this.filt = new SVF();
     this.filtMode = null;
     this.gl = 0.7071;
@@ -558,7 +561,7 @@ class Voice {
       out *= 1 - eng.tremDepth * (0.5 + 0.5 * Math.sin(this.tremPhase));
     }
 
-    // Зона спектра слоя (2-полюсник) или аналоговый окрас (1-полюсник)
+    // Зона спектра слоя (2-полюсник) или ленточный срез голоса
     if (this.filtMode) {
       this.filt.process(out);
       out = this.filtMode === 'lp' ? this.filt.oLp : (this.filtMode === 'hp' ? this.filt.oHp : this.filt.oBp);
@@ -566,6 +569,14 @@ class Voice {
       const a = 1 - Math.exp(-2 * Math.PI * eng.lp / sr);
       this.lpState += (out - this.lpState) * a;
       out = this.lpState;
+      // Второй полюс: 12 дБ/окт вместо 6. Одного мало — у пилы (струнные,
+      // синт-пэд), у FM (колокольчик, родес) и у голосов с 7-й гармоникой
+      // верхние составляющие проходили выше среза ровно в 6–12 кГц. Замер:
+      // там у ambient и струнных было на 4–5 дБ больше остальных слоёв — это
+      // и есть верх, который бьёт по ушам. Срез сдвинут вниз по крутизне,
+      // а не по частоте, поэтому тембр голосов сохранён.
+      this.lpState2 += (out - this.lpState2) * a;
+      out = this.lpState2;
     }
 
     return out * this.env * this.peak;
@@ -809,6 +820,10 @@ class LofiProcessor extends AudioWorkletProcessor {
     this.delayBufferL = new Float32Array(this.sr * 1.5);
     this.delayBufferR = new Float32Array(this.sr * 1.5);
     this.delayWrite = 0;
+    // Срез в обратной связи дилэя: без него каждый повтор приходит с полным
+    // верхом, и на длинных хвостах копится именно та полоса 2–6 кГц, что звенит.
+    this.delayLpL = 0;
+    this.delayLpR = 0;
 
     // DC / HPF / лимитер
     this.dcL = 0; this.dcR = 0; this.dcPrevL = 0; this.dcPrevR = 0;
@@ -953,13 +968,17 @@ class LofiProcessor extends AudioWorkletProcessor {
     this.density = mood.density * rnd(0.92, 1.08);
     // «Плёнка» мелодик-шины: по жанру клавиши/пэды режут на 8-10 кГц,
     // поэтому берём характер слоя и поднимаем срез в эту зону (1-полюсник, мягко).
-    // Коэффициент поднят с 1.9: при нём у «тёмных» слоёв весь верх уходил под
-    // срез раньше мастера, и полоса 2-6 кГц проваливалась на 10+ дБ.
-    this.lpBase = rnd(mood.lp[0], mood.lp[1]) * 2.2;
+    // Коэффициент был 2.2 (поднимали, когда мастер тянул 2-6 кГц): теперь верх
+    // у голосов срезан у самого источника, и шина снова чуть темнее.
+    this.lpBase = rnd(mood.lp[0], mood.lp[1]) * 1.9;
     this.kitLpF = rnd(this.kit.tilt[0], this.kit.tilt[1]);
-    this.kitHi = rnd(this.kit.hi[0], this.kit.hi[1]);
+    // Полка тембра кита: у ярких китов она больше 1, то есть поднимает верх
+    // (до +3 дБ у насыщенных машин). Замер показал, что этого много: вместе
+    // с кликом и хвостом железа она и делала драм-шину резкой, поэтому подъём
+    // оставляем вполовину — характер кита слышен, резкость ушла.
+    this.kitHi = 1 + (rnd(this.kit.hi[0], this.kit.hi[1]) - 1) * 0.5;
     // Верх барабанов всегда срезан (лента): тёмные киты — ниже граница среза
-    this.topFc = clamp(2600 + (this.kit.tilt[1] - 1400) * 1.6 + (this.kit.hi[1] - 1) * 3000, 6500, 11000) * rnd(0.94, 1.06);
+    this.topFc = clamp(2400 + (this.kit.tilt[1] - 1400) * 1.0 + (this.kit.hi[1] - 1) * 1600, 5200, 8000) * rnd(0.94, 1.06);
     DRUM_TOP = this.topFc;
     this.wowDepth = rnd(2.2, 4.6);
     this.drumBright = rnd(0.82, 1.12);
@@ -968,7 +987,10 @@ class LofiProcessor extends AudioWorkletProcessor {
     // Реверб под характер слоя: сухие слои — короткий тёмный хвост,
     // ambient/dark — длинный и светлый. Предилэй тоже свой у каждого трека.
     this.revRoom = clamp(0.74 + mood.reverb * 0.18, 0.70, 0.945);
-    this.revDamp = clamp(0.34 - mood.reverb * 0.13, 0.10, 0.40);
+    // Демпфирование хвоста: чем выше, тем темнее. Светлые хвосты (низкий
+    // коэффициент) у ambient/dark делали общий спектр ярче сухого микса —
+    // на замере наклон у ambient уходил в плюс. Держим хвост тёмным всегда.
+    this.revDamp = clamp(0.44 - mood.reverb * 0.10, 0.26, 0.46);
     this.revWet = 0.16 + mood.reverb * 0.34;
     this.preDelay = Math.round(this.sr * rnd(0.010, 0.038));
 
@@ -1355,22 +1377,24 @@ class LofiProcessor extends AudioWorkletProcessor {
     const dec = open ? rnd(h.openDec[0], h.openDec[1]) : rnd(h.dec[0], h.dec[1]);
     const bright = 0.95 + 0.1 * this.drumBright;
     // Шумовая полоса шире металлического комба, поэтому железо режем жёстче
-    // общего верха: выше 8.8 кГц у хэта ничего не остаётся.
-    const top = Math.min(this.topFc, 8800);
+    // общего верха. С 8.8 к границу опустили на 7.4 к: замер показал, что
+    // «бьющий» верх у хэта живёт как раз в 6–8 кГц, а выше у лоу-фая ничего
+    // полезного нет — только сиз.
+    const top = Math.min(this.topFc, 7400);
     const body = this.getVoice(this.noiseVoices);
     if (body) body.trigger({
-      dur: rnd(0.005, 0.016), peak: h.peak * rnd(2.4, 3.4) * accent,
+      dur: rnd(0.005, 0.016), peak: h.peak * rnd(1.8, 2.5) * accent,
       attack: rnd(0.0016, 0.0042),            // мягкий фронт: у лофая железо не щёлкает
       release: dec, bright: 0.80, pan,
-      filt: { mode: 'bp', fc: rnd(h.bp[0], h.bp[1]) * 0.92 * bright, q: h.bpQ * 0.62 },
+      filt: { mode: 'bp', fc: rnd(h.bp[0], h.bp[1]) * 0.82 * bright, q: h.bpQ * 0.62 },
       postFc: top,
     });
     const edge = this.getVoice(this.noiseVoices);
     if (edge) edge.trigger({
-      dur: rnd(0.002, 0.006), peak: h.peak * rnd(0.7, 1.3) * accent,
+      dur: rnd(0.002, 0.006), peak: h.peak * rnd(0.35, 0.7) * accent,
       attack: rnd(0.0012, 0.0032),
       release: Math.min(dec, rnd(0.02, 0.05)), bright: 0.88, pan,
-      filt: { mode: 'hp', fc: rnd(h.hp[0], h.hp[1]) * 1.15 },
+      filt: { mode: 'hp', fc: rnd(h.hp[0], h.hp[1]) * 0.95 },
       postFc: top,
     });
   }
@@ -1611,6 +1635,8 @@ class LofiProcessor extends AudioWorkletProcessor {
     // мелодик-шины мягче, но есть всегда — иначе клавиши звучат «слишком чисто».
     const musicCrush = 0.45 + crushAmt * 0.35;
     const kitLpA = 1 - Math.exp(-2 * Math.PI * this.kitLpF / sr);
+    // Срез обратной связи дилэя: 4.2 кГц — повтор темнеет с каждым кругом.
+    const delayA = 1 - Math.exp(-2 * Math.PI * 4200 / sr);
     this.topL.set(this.topFc * 1.2, 0.6, sr);
     this.topR.set(this.topFc * 1.2, 0.6, sr);
 
@@ -1746,13 +1772,16 @@ class LofiProcessor extends AudioWorkletProcessor {
       }
       const revL = wetL, revR = wetR;
 
-      // дилэй: эхо мелодии
+      // дилэй: эхо мелодии. В обратной связи — свой ленточный срез (см. выше),
+      // иначе повторы копят верх и эхо звенит поверх музыки.
       const dIdx = (this.delayWrite - Math.floor(sr * stepDur * 2) + this.delayBufferL.length) % this.delayBufferL.length;
       const delL = this.delayBufferL[dIdx];
       const delR = this.delayBufferR[dIdx];
       const delIn = this.mood.delay;
-      this.delayBufferL[this.delayWrite] = drumL * 0.08 + musicL * 0.3 * delIn + delL * 0.22;
-      this.delayBufferR[this.delayWrite] = drumR * 0.08 + musicR * 0.3 * delIn + delR * 0.22;
+      this.delayLpL += (delL - this.delayLpL) * delayA;
+      this.delayLpR += (delR - this.delayLpR) * delayA;
+      this.delayBufferL[this.delayWrite] = drumL * 0.08 + musicL * 0.3 * delIn + this.delayLpL * 0.22;
+      this.delayBufferR[this.delayWrite] = drumR * 0.08 + musicR * 0.3 * delIn + this.delayLpR * 0.22;
       this.delayWrite = (this.delayWrite + 1) % this.delayBufferL.length;
 
       // микс
