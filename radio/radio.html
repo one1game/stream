@@ -1,0 +1,2612 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LO-FI RADIO · side a/b</title>
+<meta name="description" content="Бесконечное lo-fi радио. Треки генерируются в браузере — никогда не повторяются, работают без интернета, а любой трек можно скачать файлом с обложкой.">
+<meta name="theme-color" content="#0a0810">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<!-- Превью ссылки в мессенджерах и соцсетях -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="lo-fi radio">
+<meta property="og:title" content="lo-fi radio — бесконечный лоуфай, который не повторяется">
+<meta property="og:description" content="Треки собираются в браузере из зерна: ни одного повтора, ни одного лицензированного сэмпла. Любой трек можно скачать файлом с обложкой.">
+<meta property="og:image" content="og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="lo-fi radio — бесконечный лоуфай">
+<meta name="twitter:description" content="Треки собираются в браузере из зерна: ни одного повтора. Работает офлайн, любой трек можно скачать.">
+<meta name="twitter:image" content="og.png">
+<link rel="preload" href="fonts/nunito-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/baloo-2-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="fonts/fonts.css">
+<!-- Движок грузим заранее: к первому нажатию play он уже в кэше, старт без задержки -->
+<link rel="preload" href="lofi-processor.js" as="fetch" crossorigin>
+<link rel="preload" href="plugins/mastering.js" as="fetch" crossorigin>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230a0810'/><circle cx='16' cy='16' r='9' fill='none' stroke='%23e9a95c' stroke-width='2'/><circle cx='16' cy='16' r='2.5' fill='%23e9a95c'/></svg>">
+<style>
+  /* =====================================================
+     LO-FI RADIO · визуальный язык жанра:
+     «синий час» — глубокий индиго + тёплый янтарь лампы,
+     плёночное зерно, царапины, мягкие округлые формы,
+     приглушённая типографика. Тёмная тема как основная.
+     ===================================================== */
+  :root {
+    --ink:      #0a0810;
+    --night:    #141020;
+    --night-2:  #1c1630;
+    --line:     rgba(233,169,92,0.14);
+    --amber:    #e9a95c;
+    --amber-2:  #c98b4a;
+    --rose:     #d19a8c;
+    --sage:     #93a583;
+    --cream:    #ece0cc;
+    --dim:      #8b7d92;
+    --dimmer:   #5f5468;
+    /* Кассета: тёплый матовый пластик и бумага вкладыша */
+    --plastic:  #241d2c;
+    --plastic-2:#1a1522;
+    --paper:    #e3d6bd;
+    --paper-2:  #cfc0a4;
+    --mono: ui-monospace, 'SFMono-Regular', 'Courier New', monospace;
+    --ui: 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --display: 'Baloo 2', 'Nunito', system-ui, -apple-system, sans-serif;
+    --hand: 'Caveat', 'Segoe Script', 'Comic Sans MS', cursive;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--ink);
+    color: var(--cream);
+    font-family: var(--ui);
+    padding: 20px;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Фон: два источника света в комнате + виньетка */
+  .bg {
+    position: fixed; inset: 0; z-index: -2;
+    background:
+      radial-gradient(60% 45% at 22% 12%, rgba(233,169,92,0.16), transparent 70%),
+      radial-gradient(70% 60% at 82% 92%, rgba(111,106,208,0.14), transparent 72%),
+      linear-gradient(170deg, #16112a 0%, #0c0916 55%, #08060e 100%);
+  }
+  /* Зерно плёнки: живое, дышит по кадрам */
+  .grain {
+    position: fixed; inset: -50%; z-index: -1; pointer-events: none;
+    opacity: 0.07; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+    animation: grain 0.7s steps(6) infinite;
+  }
+  @keyframes grain {
+    0%   { transform: translate(0,0); }
+    20%  { transform: translate(-3%,2%); }
+    40%  { transform: translate(2%,-3%); }
+    60%  { transform: translate(-2%,-2%); }
+    80%  { transform: translate(3%,1%); }
+    100% { transform: translate(0,0); }
+  }
+  /* Скан-линии старого экрана */
+  .scan {
+    position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: 0.35;
+    background: repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0 2px, rgba(0,0,0,0.20) 2px 3px);
+  }
+  .vignette {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 45%, transparent 45%, rgba(0,0,0,0.62) 100%);
+  }
+
+  /* ---------- Корпус: матовая кассетная дека, а не стеклянная карточка ---------- */
+  .radio {
+    position: relative; z-index: 1;
+    width: 100%; max-width: 428px;
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/></filter><rect width='180' height='180' filter='url(%23p)' opacity='0.5'/></svg>"),
+      linear-gradient(180deg, #2a2130 0%, #1c1626 42%, #140f1c 100%);
+    background-size: 180px 180px, 100% 100%;
+    background-blend-mode: soft-light, normal;
+    border: 1px solid rgba(233,169,92,0.13);
+    border-radius: 22px;
+    padding: 20px 20px 16px;
+    box-shadow:
+      0 34px 70px rgba(0,0,0,0.82),
+      0 1px 0 rgba(236,224,204,0.07) inset,
+      0 -18px 40px rgba(0,0,0,0.35) inset,
+      0 0 0 1px rgba(0,0,0,0.45);
+  }
+  /* Разъём/винт по углам — мелочь, но читается как корпус прибора */
+  .radio::after {
+    content: ''; position: absolute; inset: 8px; border-radius: 16px;
+    border: 1px solid rgba(236,224,204,0.045); pointer-events: none;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    font-family: var(--ui); font-size: 10px; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--dim); margin-bottom: 14px;
+  }
+  .brand { color: var(--cream); font-weight: 600; letter-spacing: 1.6px; opacity: 0.85; }
+  .topbar .left { display: flex; align-items: center; }
+  /* Тихий вход в список жанровых станций */
+  .stations-link {
+    margin-left: 12px; color: var(--dimmer); text-decoration: none;
+    font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+    transition: color 0.2s ease;
+  }
+  .stations-link:hover { color: var(--amber); }
+  .side { color: var(--dimmer); font-family: var(--mono); letter-spacing: 1.6px; font-size: 9px; }
+  .topbar .right { display: flex; align-items: center; gap: 10px; }
+  /* Ссылка на трек: тихая кнопка в верхней панели */
+  .share {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: none; border: none; padding: 2px 3px; cursor: pointer;
+    font-family: var(--ui); font-size: 10px; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--dimmer);
+    transition: color 0.2s ease;
+  }
+  .share:hover, .share.done { color: var(--amber); }
+  .share svg { width: 12px; height: 12px; display: block; }
+  .live-dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--amber); margin-right: 6px; vertical-align: middle;
+    box-shadow: 0 0 8px var(--amber); animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  /* ---------- Кассета: бумажный вкладыш (J-card) + шелл с катушками ---------- */
+  .cassette { position: relative; }
+  .jcard {
+    position: relative; width: 100%; padding: 9px; overflow: hidden;
+    border-radius: 10px;
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='j'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/></filter><rect width='140' height='140' filter='url(%23j)' opacity='0.4'/></svg>"),
+      linear-gradient(160deg, var(--paper) 0%, var(--paper-2) 100%);
+    background-size: 140px 140px, 100% 100%;
+    background-blend-mode: multiply, normal;
+    box-shadow: 0 16px 34px rgba(0,0,0,0.62), 0 1px 0 rgba(255,255,255,0.28) inset;
+    transition: transform 0.5s cubic-bezier(.2,.8,.2,1), opacity 0.35s ease;
+  }
+  /* Перелистывание: уводим и возвращаем */
+  .jcard.switching { opacity: 0; transform: scale(0.965) rotate(-0.6deg); }
+  .jcard canvas { display: block; width: 100%; aspect-ratio: 1/1; border-radius: 5px; }
+  /* Блик по бумаге — очень слабый, вкладыш матовый */
+  .jcard-sheen {
+    position: absolute; inset: 0; pointer-events: none; border-radius: 10px;
+    background: linear-gradient(152deg, rgba(255,255,255,0.10) 0%, transparent 36%);
+  }
+  /* Редкая полоса трекинга: протягивается сверху вниз раз в ~17 с */
+  .track-band {
+    position: absolute; left: 9px; right: 9px; top: 9px; height: 3px;
+    pointer-events: none; opacity: 0; filter: blur(0.5px);
+    background: linear-gradient(90deg, transparent, rgba(236,224,204,0.20) 14%,
+                rgba(255,255,255,0.13) 50%, rgba(236,224,204,0.20) 86%, transparent);
+    animation: trackband 17s linear infinite;
+  }
+  @keyframes trackband {
+    0%, 87%  { opacity: 0;   transform: translateY(0); }
+    89%      { opacity: 0.9; transform: translateY(52px); }
+    92%      { opacity: 0.45;transform: translateY(178px); }
+    95%      { opacity: 0.75;transform: translateY(312px); }
+    97%,100% { opacity: 0;   transform: translateY(430px); }
+  }
+
+  /* ---------- Шелл кассеты: две катушки и окно ленты ---------- */
+  .shell {
+    position: relative; height: 58px; margin: 10px 2px 0;
+    display: flex; align-items: center; justify-content: center; gap: 11px;
+    border-radius: 9px;
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='s'><feTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23s)' opacity='0.35'/></svg>"),
+      linear-gradient(180deg, #2e2638 0%, #221b2c 58%, #16111f 100%);
+    background-size: 120px 120px, 100% 100%;
+    background-blend-mode: soft-light, normal;
+    box-shadow: 0 1px 0 rgba(236,224,204,0.09) inset, 0 10px 20px rgba(0,0,0,0.55),
+                0 0 0 1px rgba(0,0,0,0.55);
+  }
+  /* Обе катушки крутятся в ОДНУ сторону (по часовой), с разной скоростью:
+     лента перетекает с подающей на принимающую, поэтому обороты не совпадают. */
+  .reel {
+    position: relative; flex: 0 0 auto;
+    width: 38px; height: 38px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 42%, #352c42 0%, #1d1727 72%);
+    box-shadow: 0 0 0 1px rgba(236,224,204,0.11) inset, 0 0 0 4px rgba(0,0,0,0.30);
+    animation: reels 5.4s linear infinite;
+    animation-play-state: paused;
+  }
+  .reel.right { animation-duration: 4.2s; }
+  .playing .reel { animation-play-state: running; }
+  .reel::before {                 /* спицы */
+    content: ''; position: absolute; inset: 6px; border-radius: 50%;
+    background: repeating-conic-gradient(from 0deg,
+      rgba(236,224,204,0.15) 0 11deg, transparent 11deg 60deg);
+  }
+  .reel::after {                  /* втулка */
+    content: ''; position: absolute; left: 50%; top: 50%;
+    width: 11px; height: 11px; margin: -5.5px 0 0 -5.5px; border-radius: 50%;
+    background: radial-gradient(circle, #4b4059, #241d2e);
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.55);
+  }
+  @keyframes reels { to { transform: rotate(360deg); } }
+  .tape-window {
+    position: relative; flex: 1 1 auto; max-width: 122px; height: 22px;
+    border-radius: 4px; overflow: hidden;
+    background: linear-gradient(180deg, rgba(4,3,8,0.75), rgba(2,2,5,0.9));
+    box-shadow: 0 0 0 1px rgba(236,224,204,0.08) inset;
+  }
+  .tape-window i {
+    position: absolute; inset: 0;
+    background: repeating-linear-gradient(90deg,
+      rgba(236,224,204,0.07) 0 1px, transparent 1px 6px);
+    animation: tape 1.15s linear infinite;
+    animation-play-state: paused;
+  }
+  .playing .tape-window i { animation-play-state: running; }
+  /* Лента в окне бежит в ту же сторону, что и низ катушек — влево */
+  @keyframes tape { to { transform: translateX(-6px); } }
+  /* Подпись под шеллом — как на этикетке кассеты */
+  .shell-cap {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 8px 3px 0; font-family: var(--mono); font-size: 8.5px;
+    letter-spacing: 1.5px; text-transform: uppercase; color: var(--dimmer);
+  }
+  .shell-cap .cat { color: rgba(233,169,92,0.55); }
+  .hand-note {
+    font-family: var(--hand); font-size: 15px; color: rgba(211,196,168,0.72);
+    letter-spacing: 0.3px; text-transform: none;
+  }
+
+  /* ---------- Название трека: мягкий округлый шрифт, без сурового моно ---------- */
+  .meta { padding: 15px 2px 11px; }
+  .track {
+    font-family: var(--display);
+    font-size: 23px; font-weight: 600; letter-spacing: 0.1px;
+    color: var(--cream); line-height: 1.2;
+    text-shadow: -0.6px 0 rgba(224,120,110,0.22), 0.6px 0 rgba(110,180,220,0.20);
+    transition: opacity 0.3s ease;
+  }
+  .track.switching { opacity: 0; }
+  .artist {
+    font-family: var(--ui); font-weight: 400;
+    font-size: 11.5px; letter-spacing: 0.5px;
+    color: var(--dim); margin-top: 5px;
+    transition: opacity 0.3s ease;
+  }
+  .artist.switching { opacity: 0; }
+
+  /* ---------- Волна: мягкий силуэт ленты, а не частокол ---------- */
+  .wave-wrap {
+    position: relative; height: 48px; margin: 4px 0 13px;
+    border-radius: 9px; overflow: hidden;
+    background: linear-gradient(180deg, rgba(0,0,0,0.22), rgba(0,0,0,0.04));
+    border: 1px solid rgba(236,224,204,0.05);
+  }
+  .wave-wrap canvas { display: block; width: 100%; height: 100%; }
+  .wave-wrap::after {          /* мягкие штрихи ленты вместо жёсткой сетки */
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0 5px, rgba(0,0,0,0.13) 5px 6px);
+    opacity: 0.45;
+  }
+  /* Счётчик ленты: моно — здесь он уместен, так пишут на деке */
+  .time {
+    position: absolute; right: 9px; top: 6px;
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 9px; letter-spacing: 1px;
+    color: var(--dimmer);
+  }
+  .time .vhs { color: rgba(233,169,92,0.0); font-size: 8px; transition: color 0.4s ease; }
+  .playing .time .vhs { color: rgba(233,169,92,0.85); }
+
+  /* ---------- Транспорт: клавиши кассетной деки ---------- */
+  .transport { display: flex; align-items: center; justify-content: center; gap: 13px; margin: 2px 0 0; }
+  .btn {
+    font-family: var(--ui); cursor: pointer; border: none;
+    transition: transform 0.12s ease, box-shadow 0.22s ease, background 0.22s ease, color 0.22s ease;
+  }
+  .btn:active { transform: translateY(2px); }
+  .key {
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    height: 46px; padding: 0 26px; border-radius: 7px;
+    font-family: var(--display); font-weight: 600; font-size: 15px;
+    letter-spacing: 0.5px; color: #211706;
+    background: linear-gradient(180deg, #f2c079 0%, #d99f59 52%, #bd8244 100%);
+    box-shadow: 0 2px 0 rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.38) inset,
+                0 10px 22px rgba(233,169,92,0.18);
+  }
+  .key:hover { filter: brightness(1.06); }
+  .key.ghost {
+    padding: 0 20px; color: var(--amber);
+    background: linear-gradient(180deg, #2c2336 0%, #1a1424 100%);
+    box-shadow: 0 2px 0 rgba(0,0,0,0.5), 0 1px 0 rgba(236,224,204,0.07) inset,
+                0 0 0 1px rgba(233,169,92,0.15) inset;
+  }
+  /* Пока играет — клавиша уходит вниз, как отжатая дека */
+  .key.playing {
+    color: var(--amber);
+    background: linear-gradient(180deg, #241d2e 0%, #161121 100%);
+    box-shadow: 0 1px 0 rgba(0,0,0,0.5), 0 1px 0 rgba(236,224,204,0.05) inset,
+                0 0 0 1px rgba(233,169,92,0.22) inset;
+  }
+  .key svg { width: 16px; height: 16px; display: block; }
+
+  /* ---------- Лента: громкость и подпись ---------- */
+  .deck {
+    margin-top: 16px; padding-top: 13px;
+    border-top: 1px solid rgba(236,224,204,0.06);
+    display: flex; align-items: center; gap: 11px;
+  }
+  .vol-ico { display: flex; color: var(--dim); }
+  .vol-ico svg { width: 14px; height: 14px; display: block; }
+  .vol {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; height: 3px; border-radius: 3px; cursor: pointer; outline: none;
+    background: linear-gradient(90deg, var(--amber-2) 0%, var(--amber-2) 78%, rgba(236,224,204,0.12) 78%);
+  }
+  .vol::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+    background: #f2d3a4; box-shadow: 0 0 0 1px rgba(10,8,16,0.65), 0 2px 8px rgba(0,0,0,0.5);
+  }
+  .vol::-moz-range-thumb {
+    width: 12px; height: 12px; border: none; border-radius: 50%; background: #f2d3a4;
+  }
+  .flavor {
+    font-family: var(--hand); font-size: 15px; letter-spacing: 0.2px;
+    color: rgba(211,196,168,0.60); white-space: nowrap;
+  }
+
+  /* ---------- Ошибка ---------- */
+  .error {
+    display: none; margin-top: 12px; padding: 10px 12px;
+    font-size: 11px; line-height: 1.5; color: #ffb3a7;
+    background: rgba(209,154,140,0.10); border: 1px solid rgba(209,154,140,0.25);
+    border-radius: 10px;
+  }
+  @media (max-width: 460px) {
+    .radio { padding: 18px 16px 14px; border-radius: 20px; }
+    .track { font-size: 19px; }
+    .flavor { display: none; }
+  }
+  /* ---------- Встраивание: компактный плеер для страниц станций ----------
+     В рамке высотой около 200 px вертикальная карточка не влезала целиком —
+     её верх и низ обрезались. Здесь расклад идёт вбок: обложка слева,
+     справа название, волна, управление. Катушки и подпись кассеты убираем:
+     в рамке они только отъедают высоту. Верхнюю панель не прячем, а
+     разбираем по частям — save и link нужны прямо в рамке, как на главной. */
+  html.embed body { background: transparent; padding: 8px; }
+  html.embed .bg, html.embed .grain, html.embed .scan, html.embed .vignette { display: none; }
+  html.embed .topbar, html.embed .topbar .right, html.embed .transport { display: contents; }
+  html.embed .brand, html.embed .stations-link, html.embed .topbar .side,
+  html.embed .shell, html.embed .shell-cap { display: none; }
+  html.embed .radio {
+    display: grid; align-items: center;
+    grid-template-columns: clamp(96px, 30%, 168px) auto auto auto auto 1fr;
+    grid-template-areas:
+      'cover meta meta meta meta meta'
+      'cover wave wave wave wave wave'
+      'cover play next save link spare'
+      'cover deck deck deck deck deck';
+    gap: 2px 6px; max-width: 520px; padding: 12px;
+  }
+  html.embed .cassette { grid-area: cover; margin-right: 8px; }
+  html.embed .meta { grid-area: meta; padding: 0; }
+  /* Название — не длиннее двух строк, подпись — в одну: иначе на узком
+     экране рамка вырастает и в ней появляется прокрутка. */
+  html.embed .track {
+    font-size: 17px; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden;
+  }
+  html.embed .artist { font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  html.embed .wave-wrap { grid-area: wave; height: 34px; margin: 3px 0 0; }
+  html.embed #playBtn { grid-area: play; }
+  html.embed #nextBtn { grid-area: next; }
+  html.embed #saveBtn { grid-area: save; }
+  html.embed #shareBtn { grid-area: link; }
+  html.embed .key { height: 34px; padding: 0 14px; font-size: 13px; margin-top: 5px; }
+  html.embed .key.ghost { padding: 0 12px; }
+  html.embed .deck { grid-area: deck; margin-top: 6px; padding-top: 8px; }
+  html.embed .flavor { display: none; }
+  html.embed .error { grid-column: 1 / -1; }
+  /* Узкая рамка (телефон): клавиши без подписей — иначе они вылезают за край */
+  @media (max-width: 430px) {
+    html.embed .key, html.embed .key.ghost { padding: 0 11px; }
+    html.embed .key span, html.embed .share span { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<div class="grain"></div>
+<div class="scan"></div>
+<div class="vignette"></div>
+
+<div class="radio" id="radio">
+  <div class="topbar">
+    <span class="brand"><span class="live-dot" id="liveDot" style="display:none"></span>lo-fi radio</span>
+    <a class="stations-link" href="stations/index.html" title="Все жанровые слои">станции</a>
+    <span class="right">
+      <span class="side" id="sideLabel">side a</span>
+      <button class="share" id="saveBtn" disabled title="Скачать трек файлом — с обложкой и названием">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a1 1 0 0 1 1 1v9.6l3.29-3.3a1 1 0 1 1 1.42 1.42l-5 5a1 1 0 0 1-1.42 0l-5-5a1 1 0 1 1 1.42-1.42L11 13.6V4a1 1 0 0 1 1-1zM4 19a1 1 0 0 1 1-1h14a1 1 0 1 1 0 2H5a1 1 0 0 1-1-1z"/></svg>
+        <span id="saveLabel">save</span>
+      </button>
+      <button class="share" id="shareBtn" title="Скопировать ссылку на этот трек">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10.6 13.4a3 3 0 0 0 4.2 0l3.4-3.4a3 3 0 1 0-4.24-4.24l-1.2 1.2 1.42 1.42 1.2-1.2a1 1 0 0 1 1.42 1.42l-3.4 3.4a1 1 0 0 1-1.42 0zm2.8-2.8a3 3 0 0 0-4.2 0l-3.4 3.4a3 3 0 1 0 4.24 4.24l1.2-1.2-1.42-1.42-1.2 1.2a1 1 0 0 1-1.42-1.42l3.4-3.4a1 1 0 0 1 1.42 0z"/></svg>
+        <span id="shareLabel">link</span>
+      </button>
+    </span>
+  </div>
+
+  <div class="cassette">
+    <div class="jcard" id="coverWrap">
+      <canvas id="cover"></canvas>
+      <div class="jcard-sheen"></div>
+      <div class="track-band"></div>
+    </div>
+  </div>
+
+  <div class="shell">
+    <span class="reel left"></span>
+    <span class="tape-window"><i></i></span>
+    <span class="reel right"></span>
+  </div>
+  <div class="shell-cap">
+    <span id="shellSide">side a · c-60</span>
+    <span class="cat" id="shellCat">lf-0000</span>
+  </div>
+
+  <div class="meta">
+    <div class="track" id="trackName">нажми play</div>
+    <div class="artist" id="artist">lo-fi radio · non-stop</div>
+  </div>
+
+  <div class="wave-wrap">
+    <canvas id="wave"></canvas>
+    <div class="time"><span class="vhs">&#9654;</span><span id="time">0:00 / 0:00</span></div>
+  </div>
+
+  <div class="transport">
+    <button class="key btn" id="playBtn" title="Играть / пауза">
+      <svg viewBox="0 0 24 24" fill="currentColor" id="playIcon"><path d="M8 5.5v13l11-6.5z"/></svg>
+      <span id="playLabel">play</span>
+    </button>
+    <button class="key ghost btn" id="nextBtn" title="Другая композиция">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5.5v13l9-6.5zM17 5h2v14h-2z"/></svg>
+      <span>next</span>
+    </button>
+  </div>
+
+  <div class="deck">
+    <span class="vol-ico" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 9h3l5-4v14l-5-4H4zM16.5 8.2a4 4 0 0 1 0 7.6v-1.6a2.5 2.5 0 0 0 0-4.4z"/></svg>
+    </span>
+    <input class="vol" id="vol" type="range" min="0" max="100" value="80" aria-label="Громкость">
+    <span class="flavor">тихо · тепло · лента</span>
+  </div>
+
+  <div class="error" id="error"></div>
+</div>
+
+<script>
+/* =====================================================
+   LO-FI RADIO
+   Аудио — AudioWorklet (lofi-processor → mastering → выход).
+   Название и обложка трека генерируются процедурно из seed,
+   который присылает ворклет: у каждой композиции своя картинка.
+   ===================================================== */
+
+let ctx = null, workletNode = null, analyser = null, masteringNode = null, masterGain = null;
+let isPlaying = false;
+let pendingSeed = null;
+let progress = 0;          // 0..1 — докуда дошёл трек (рисуем плейхед по волне)
+const VOL_KEY = 'lofi-vol';
+
+/* =====================================================
+   ЗЕРНО ТРЕКА
+   Каждый новый трек — свежее случайное зерно, поэтому эфир
+   никогда не повторяется. Зерно же задаёт трек целиком, поэтому
+   ссылка ?t=<hex> и скачанный файл звучат ровно как эфир.
+   Ни сервера, ни одного сохранённого байта аудио.
+   ===================================================== */
+const hex32 = n => (n >>> 0).toString(16).padStart(8, '0');
+
+let linkSeed = null;       // зерно из ссылки: играем именно его
+let forcedMood = null;     // слой из ссылки: страница станции держит свой жанр
+let sentInitialSeed = false;
+
+(function readLink() {
+  const q = new URLSearchParams(location.search);
+  const t = q.get('t');
+  if (t && /^[0-9a-f]{1,8}$/i.test(t)) linkSeed = parseInt(t, 16) >>> 0;
+  const m = q.get('m');
+  if (m && /^[a-z0-9-]{2,16}$/.test(m)) forcedMood = m;
+  // Встраивание: хозяину страницы нужен плеер, а не наша рамка
+  if (q.get('embed') === '1') document.documentElement.classList.add('embed');
+})();
+
+// Ссылка на текущий трек — по требованию, а не постоянно в адресной строке:
+// иначе перезагрузка возвращала бы тот же трек вместо нового случайного.
+// Слой станции сохраняем: ссылка с страницы жанра остаётся в своём жанре.
+function trackLink(seed) {
+  const base = location.origin + location.pathname;
+  return base + '?t=' + hex32(seed) + (forcedMood ? '&m=' + forcedMood : '');
+}
+
+// roundRect есть не во всех сборках — обложка не должна падать из-за углов
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    this.moveTo(x + rr, y);
+    this.arcTo(x + w, y, x + w, y + h, rr);
+    this.arcTo(x + w, y + h, x, y + h, rr);
+    this.arcTo(x, y + h, x, y, rr);
+    this.arcTo(x, y, x + w, y, rr);
+    this.closePath();
+    return this;
+  };
+}
+
+const playBtn   = document.getElementById('playBtn');
+const playLabel = document.getElementById('playLabel');
+const playIcon  = document.getElementById('playIcon');
+const nextBtn   = document.getElementById('nextBtn');
+const coverWrap = document.getElementById('coverWrap');
+const coverCv   = document.getElementById('cover');
+const waveCv    = document.getElementById('wave');
+const trackEl   = document.getElementById('trackName');
+const artistEl  = document.getElementById('artist');
+const sideEl    = document.getElementById('sideLabel');
+const shellSideEl = document.getElementById('shellSide');
+const shellCatEl  = document.getElementById('shellCat');
+const radioEl   = document.getElementById('radio');
+const volEl     = document.getElementById('vol');
+const timeEl    = document.getElementById('time');
+const errorEl   = document.getElementById('error');
+const liveDot   = document.getElementById('liveDot');
+const shareBtn  = document.getElementById('shareBtn');
+const shareLabel = document.getElementById('shareLabel');
+const saveBtn   = document.getElementById('saveBtn');
+const saveLabel = document.getElementById('saveLabel');
+
+/* =====================================================
+   1. ГЕНЕРАТОР НАЗВАНИЙ
+   Лоу-фай называет треки строчными, коротко и по-домашнему:
+   ночь, окно, дождь, лента, кружка. Собираем из слоёв по слоям жанра.
+   ===================================================== */
+const NAME = {
+  dusty:        { adj:['dusty','worn','faded','analog','paper','velvet','warm','second-hand'],
+                  noun:['tape','vinyl','crate','groove','sample','loop','cardigan','notebook','needle','sleeve'] },
+  jazzhop:      { adj:['blue','smoky','mellow','late','velvet','soft','honey','uptown'],
+                  noun:['keys','cafe','piano','rhodes','brushes','smoke','corner','session','harlem','bassline'] },
+  chillhop:     { adj:['sunlit','easy','gentle','quiet','soft','open','morning'],
+                  noun:['window','daydream','sunbeam','balcony','plant','kettle','porch','postcard','sweater','breeze'] },
+  midnight:     { adj:['midnight','dark','lonely','cold','hollow','empty'],
+                  noun:['streetlight','alley','rooftop','platform','train','rain','lamppost','signal','taxi','hotel'] },
+  ambient:      { adj:['distant','slow','still','weightless','pale','frozen'],
+                  noun:['field','drift','snow','tide','haze','cloud','harbor','glacier','orbit','fog'] },
+  experimental: { adj:['broken','crooked','half','odd','glitchy','unfinished'],
+                  noun:['signal','error','cassette','demo','outtake','static','b-side','magnet','circuit','vhs'] },
+  'lofi-house': { adj:['neon','wet','deep','late','after'],
+                  noun:['asphalt','puddle','subway','basement','terrace','marquee','headlights','dancefloor','gutter','tram'] },
+  soul:         { adj:['slow','warm','velvet','honey','tender','honest'],
+                  noun:['letter','silk','promise','afterglow','mistake','heart','slow jam','velour','goodbye','sunday'] },
+  bossa:        { adj:['sandy','gentle','sunny','lazy','quiet'],
+                  noun:['beach','nylon','breeze','hammock','island','coast','girl','esplanade','lime','sand'] },
+  piano:        { adj:['quiet','soft','small','pale','honest'],
+                  noun:['piano','room','letter','morning','practice','hymn','snowfall','wood','bench','page'] },
+  dark:         { adj:['hollow','deep','cold','sunken','ancient'],
+                  noun:['cathedral','tunnel','abyss','glass','void','ash','mourning','drowned','stone','reliquary'] },
+  trap:         { adj:['night','heavy','slow','cold','low'],
+                  noun:['sub','drift','chrome','ghost','vault','static','ice','marble','smoke','signal'] },
+  dub:          { adj:['deep','echoing','sunken','low','slow'],
+                  noun:['echo','chamber','pressure','version','cavern','channel','tape','horn','well','trench'] },
+  vapor:        { adj:['faded','pastel','warped','melted','slow'],
+                  noun:['mall','plaza','sunset','palm','atrium','fountain','pool','arcade','lobby','cassette'] },
+  chip:         { adj:['pixel','8-bit','tiny','bright','little'],
+                  noun:['cartridge','sprite','arcade','save','level','bonus','console','demo','boss','coin'] },
+  guitar:       { adj:['warm','nylon','soft','open','wooden','gentle'],
+                  noun:['strings','porch','chord','capo','cabin','melody','frets','song','hollow','tune'] },
+  strings:      { adj:['slow','cold','wide','distant','pale','rising'],
+                  noun:['strings','hall','cello','swell','choir','arc','vigil','marble','ascent','veil'] },
+  vocal:        { adj:['hushed','close','breathy','soft','late','tender'],
+                  noun:['voice','choir','words','hum','sigh','whisper','vowel','echo','lullaby','name'] },
+  musicbox:     { adj:['tiny','silver','small','wind-up','pale','bright'],
+                  noun:['box','chime','bell','lullaby','tin','waltz','snow','sugar','glass','sprinkle'] },
+  bedroom:      { adj:['bedroom','homemade','taped','lazy','sunny','messy'],
+                  noun:['demo','take','poster','window','cassette','guitar','door','tape','floor','song'] },
+};
+const TIME_WORDS = ['midnight','3am','2am','4am','dusk','blue hour','half past two','last night',
+                    'small hours','after hours','sunday night','late evening','early morning'];
+const TAILS = ['drift','loop','tape','hours','notes','sketch','take','study','haze','glow','echo',
+               'lull','pause','interlude','reprise','mood','room','session','outtake','version','demo'];
+
+function pickFrom(arr, r) { return arr[Math.floor(r() * arr.length) % arr.length]; }
+
+// Название детерминировано зерном: тот же трек — то же имя
+function makeName(seed, mood) {
+  const r = mulberry32(seed ^ 0x9e3779b9);
+  const pool = NAME[mood] || NAME.dusty;
+  const adj = pickFrom(pool.adj, r);
+  const noun = pickFrom(pool.noun, r);
+  const t = pickFrom(TIME_WORDS, r);
+  const tail = pickFrom(TAILS, r);
+  const roll = r();
+  if (roll < 0.20) return t + ' ' + noun;                 // midnight rooftop
+  if (roll < 0.38) return noun + ' ' + tail;              // cassette sessions
+  if (roll < 0.52) return t + ' ' + adj + ' ' + noun;     // 3am soft rain (редко длинно)
+  if (roll < 0.72) return adj + ' ' + noun;               // dusty sleeve
+  return noun + ' ' + tail;                               // puddle drift
+}
+
+// Пул названий конечен, поэтому в рамках сессии следим за повторами:
+// если зерно дало уже звучавшее имя — берём его же с другой солью.
+// Так имя остаётся детерминированным для трека, но не повторяется подряд.
+const usedNames = new Set();
+const SALT = [0, 0x5bf03635, 0x27d4eb2f, 0x165667b1, 0x9e3779b9, 0x85ebca6b];
+function nameFor(seed, mood) {
+  for (const s of SALT) {
+    const n = makeName(((seed ^ s) >>> 0), mood);
+    if (!usedNames.has(n)) {
+      usedNames.add(n);
+      if (usedNames.size > 400) usedNames.delete(usedNames.values().next().value);
+      return n;
+    }
+  }
+  return makeName(seed, mood);
+}
+
+/* =====================================================
+   2. ОБЛОЖКА
+   Каждая картинка — свой сюжет по настроению трека.
+   Всё детерминировано зерном, поэтому обложка стабильна.
+   ===================================================== */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+}
+
+// «Синий час»: холодная ночь + тёплая лампа. Оттенки — из палитр жанра.
+const PALS = {
+  dusty:        { sky:['#33283a','#141019'], warm:'#e2a45f', cool:'#8a7aa8', sil:'#0d0a14' },
+  jazzhop:      { sky:['#332a3c','#161123'], warm:'#e6ab63', cool:'#7c8bb0', sil:'#100c18' },
+  chillhop:     { sky:['#433645','#1c1730'], warm:'#f2bd72', cool:'#8fa8c0', sil:'#151024' },
+  midnight:     { sky:['#181430','#090712'], warm:'#e9a95c', cool:'#5f6ea8', sil:'#07050d' },
+  ambient:      { sky:['#28303e','#0f131d'], warm:'#cdb08a', cool:'#7e97ad', sil:'#0b0e16' },
+  experimental: { sky:['#2a2038','#100c18'], warm:'#d98f6a', cool:'#9a86c0', sil:'#0b0812' },
+  'lofi-house': { sky:['#261c40','#0c0a1e'], warm:'#f0a55e', cool:'#6f6ad0', sil:'#08061a' },
+  soul:         { sky:['#3a2a30','#160f1a'], warm:'#eeb070', cool:'#a08098', sil:'#0f0a12' },
+  bossa:        { sky:['#4a3c40','#1e1826'], warm:'#f6c681', cool:'#9fb6a8', sil:'#171220' },
+  piano:        { sky:['#3e3844','#191726'], warm:'#e8c9a0', cool:'#a8b4c8', sil:'#141322' },
+  dark:         { sky:['#141830','#05060e'], warm:'#c88a5a', cool:'#4a5a90', sil:'#04040a' },
+  trap:         { sky:['#1a1c2e','#08080f'], warm:'#e0a860', cool:'#6a7ab0', sil:'#06060c' },
+  dub:          { sky:['#1c2a2c','#0a1014'], warm:'#d9a05c', cool:'#6a9a94', sil:'#070c0e' },
+  vapor:        { sky:['#3c3050','#1a1428'], warm:'#f4b8a0', cool:'#a89ad0', sil:'#120e1e' },
+  chip:         { sky:['#241c4a','#0a0818'], warm:'#f0b060', cool:'#5f7fe0', sil:'#070612' },
+  guitar:       { sky:['#3a2f34','#150f16'], warm:'#e8a862', cool:'#9a8ab0', sil:'#0e0a11' },
+  strings:      { sky:['#2c2f42','#0d0e18'], warm:'#d8b48c', cool:'#8a9ac8', sil:'#090a12' },
+  vocal:        { sky:['#3a2836','#150e18'], warm:'#f0a878', cool:'#a488b8', sil:'#0f0a12' },
+  musicbox:     { sky:['#3e3a4e','#171528'], warm:'#ecc9a8', cool:'#a8b0d8', sil:'#131126' },
+  bedroom:      { sky:['#433848','#1a1526'], warm:'#f2bc84', cool:'#98a8c8', sil:'#140f20' },
+};
+// Сюжетов у каждого слоя несколько: настроение задаёт палитру и характер,
+// а конкретную сцену выбирает зерно — иначе все треки одного настроения
+// выглядели бы близнецами.
+const SCENE = {
+  dusty:        ['room','window','rooftop','cafe'],
+  jazzhop:      ['cafe','room','city','train'],
+  chillhop:     ['window','field','room','beach'],
+  midnight:     ['city','neon','train','rooftop','window'],
+  ambient:      ['field','window','beach','city'],
+  experimental: ['glitch','arcade','city','neon'],
+  'lofi-house': ['neon','city','rooftop','glitch'],
+  soul:         ['cafe','train','room','window'],
+  bossa:        ['beach','field','window','room'],
+  piano:        ['room','window','beach','cafe'],
+  dark:         ['cathedral','glitch','city','field'],
+  trap:         ['neon','arcade','rooftop','city','glitch'],
+  dub:          ['cathedral','train','neon','city','field'],
+  vapor:        ['mall','arcade','neon','city','window'],
+  chip:         ['arcade','glitch','mall','neon','city'],
+  guitar:       ['room','window','rooftop','cafe'],
+  strings:      ['cathedral','field','window','rooftop'],
+  vocal:        ['cafe','train','room','neon'],
+  musicbox:     ['window','room','field','beach'],
+  bedroom:      ['room','cafe','window','rooftop'],
+};
+// Тонировка кадра: ночь / лампа / сумерки / рассвет — четвёртая ось разнообразия
+const TINTS = [
+  { warm: 0.05, cool: 0.00 },
+  { warm: 0.14, cool: 0.00 },
+  { warm: 0.08, cool: 0.05 },
+  { warm: 0.02, cool: 0.09 },
+];
+
+// Плитка зерна: рисуем один раз и тайлим — дешевле, чем шум по пикселям
+let grainTile = null;
+function grain() {
+  if (grainTile) return grainTile;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  const d = x.createImageData(128, 128);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const v = 128 + (Math.random() * 2 - 1) * 52;
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+    d.data[i + 3] = 255;
+  }
+  x.putImageData(d, 0, 0);
+  grainTile = c;
+  return c;
+}
+
+// --- слои сюжета ---
+function sky(g, S, r, pal) {
+  const grd = g.createLinearGradient(0, 0, 0, S);
+  grd.addColorStop(0, pal.sky[0]);
+  grd.addColorStop(1, pal.sky[1]);
+  g.fillStyle = grd;
+  g.fillRect(0, 0, S, S);
+  // тёплое пятно света: лампа, закат, фара
+  const lx = S * (0.12 + 0.68 * r()), ly = S * (0.10 + 0.34 * r());
+  const glow = g.createRadialGradient(lx, ly, 0, lx, ly, S * 0.68);
+  glow.addColorStop(0, hexA(pal.warm, 0.40));
+  glow.addColorStop(0.45, hexA(pal.warm, 0.10));
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = glow;
+  g.fillRect(0, 0, S, S);
+}
+
+function rainStreaks(g, S, r, np, alpha, area) {
+  const x0 = area ? area[0] : 0, y0 = area ? area[1] : 0;
+  const w = area ? area[2] : S, h = area ? area[3] : S;
+  g.save();
+  g.lineCap = 'round';
+  for (let i = 0; i < np; i++) {
+    const x = x0 + r() * w, y = y0 + r() * h;
+    const len = S * (0.02 + 0.09 * r());
+    g.strokeStyle = 'rgba(236,224,204,' + (alpha * (0.25 + 0.75 * r())).toFixed(3) + ')';
+    g.lineWidth = S * (0.0012 + 0.002 * r());
+    g.beginPath();
+    g.moveTo(x, y);
+    g.lineTo(x - len * 0.22, y + len);
+    g.stroke();
+  }
+  g.restore();
+}
+
+function snowfall(g, S, r, np, alpha, area) {
+  const x0 = area ? area[0] : 0, y0 = area ? area[1] : 0;
+  const w = area ? area[2] : S, h = area ? area[3] : S;
+  for (let i = 0; i < np; i++) {
+    g.fillStyle = 'rgba(242,246,255,' + (alpha * (0.30 + 0.70 * r())).toFixed(3) + ')';
+    g.beginPath();
+    g.arc(x0 + r() * w, y0 + r() * h, S * (0.0012 + 0.0030 * r()), 0, 6.3);
+    g.fill();
+  }
+}
+
+// Боке: размытые огни на заднем плане — у лоу-фая их любят не меньше дождя
+function bokeh(g, S, r, pal, n) {
+  for (let i = 0; i < n; i++) {
+    const x = r() * S, y = S * (0.28 + 0.60 * r());
+    const rad = S * (0.010 + 0.048 * r());
+    const c = r() < 0.6 ? pal.warm : pal.cool;
+    const grd = g.createRadialGradient(x, y, 0, x, y, rad);
+    grd.addColorStop(0, hexA(c, 0.14 + 0.24 * r()));
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, rad, 0, 6.3); g.fill();
+  }
+}
+
+// Кот на подоконнике — самый узнаваемый мотив жанра
+function catOnSill(g, S, r, pal, x, y, s) {
+  g.fillStyle = hexA(pal.sil, 0.97);
+  g.beginPath();
+  g.ellipse(x, y, s * 0.9, s * 0.40, 0, 0, 6.3);
+  g.fill();
+  g.beginPath();
+  g.arc(x + s * 0.78, y - s * 0.30, s * 0.29, 0, 6.3);
+  g.fill();
+  g.beginPath();
+  g.moveTo(x + s * 0.60, y - s * 0.48); g.lineTo(x + s * 0.66, y - s * 0.78); g.lineTo(x + s * 0.80, y - s * 0.54);
+  g.closePath();
+  g.moveTo(x + s * 0.88, y - s * 0.54); g.lineTo(x + s * 1.02, y - s * 0.78); g.lineTo(x + s * 1.06, y - s * 0.46);
+  g.closePath();
+  g.fill();
+  g.strokeStyle = hexA(pal.sil, 0.97);
+  g.lineWidth = s * 0.15;
+  g.beginPath();
+  g.moveTo(x - s * 0.85, y + s * 0.05);
+  g.quadraticCurveTo(x - s * 1.28, y - s * 0.06, x - s * 1.22, y - s * 0.52);
+  g.stroke();
+}
+
+// Мокрый асфальт: вертикальные отражения огней
+function wetGround(g, S, r, pal, baseY) {
+  const rf = g.createLinearGradient(0, S * baseY, 0, S);
+  rf.addColorStop(0, hexA(pal.cool, 0.16));
+  rf.addColorStop(1, hexA(pal.warm, 0.10));
+  g.fillStyle = rf;
+  g.fillRect(0, S * baseY, S, S * (1 - baseY));
+  for (let i = 0; i < 18; i++) {
+    g.fillStyle = hexA(r() < 0.6 ? pal.warm : pal.cool, 0.05 + 0.13 * r());
+    g.fillRect(r() * S, S * (baseY + 0.02 + 0.30 * r()), S * (0.004 + 0.010 * r()), S * (0.05 + 0.16 * r()));
+  }
+}
+
+function city(g, S, r, pal, groundY) {
+  const base = S * (groundY || 0.66);
+  for (let layer = 0; layer < 2; layer++) {
+    const far = layer === 0;
+    let x = -S * 0.05;
+    while (x < S + S * 0.05) {
+      const w = S * (far ? 0.05 + 0.09 * r() : 0.07 + 0.12 * r());
+      const h = far ? base * (0.16 + 0.30 * r()) : base * (0.26 + 0.44 * r());
+      g.fillStyle = hexA(pal.sil, far ? 0.72 : 1);
+      g.fillRect(x, base - h, w, h + S);
+      if (!far) {
+        const cols = Math.max(1, Math.round(w / (S * 0.022)));
+        const rows = Math.max(1, Math.round(h / (S * 0.030)));
+        for (let i = 0; i < cols; i++) {
+          for (let j = 0; j < rows; j++) {
+            if (r() < 0.30) {
+              g.fillStyle = hexA(r() < 0.72 ? pal.warm : pal.cool, 0.25 + 0.55 * r());
+              g.fillRect(x + S * 0.008 + i * (w - S * 0.016) / cols,
+                         base - h + S * 0.010 + j * (h - S * 0.02) / rows,
+                         S * 0.006, S * 0.009);
+            }
+          }
+        }
+      }
+      x += w + S * 0.010 * r();
+    }
+  }
+  g.fillStyle = hexA(pal.sil, 1);
+  g.fillRect(0, base, S, S - base);
+}
+
+function interior(g, S, r, pal, opts) {
+  // стена и глубина комнаты
+  const wg = g.createLinearGradient(0, 0, 0, S);
+  wg.addColorStop(0, pal.sky[0]);
+  wg.addColorStop(1, hexA(pal.sil, 0.96));
+  g.fillStyle = wg;
+  g.fillRect(0, 0, S, S);
+
+  // окно с ночью (положение и размер гуляют от трека к треку)
+  const wx = S * (0.05 + 0.13 * r()), wy = S * (0.08 + 0.10 * r());
+  const ww = S * (0.38 + 0.16 * r()), wh = S * (0.32 + 0.16 * r());
+  const ns = g.createLinearGradient(0, wy, 0, wy + wh);
+  ns.addColorStop(0, hexA(pal.cool, 0.50));
+  ns.addColorStop(1, hexA(pal.warm, 0.22));
+  g.fillStyle = ns;
+  g.fillRect(wx, wy, ww, wh);
+  for (let i = 0; i < 26; i++) {                       // далёкие огни за стеклом
+    g.fillStyle = hexA(pal.warm, 0.15 + 0.5 * r());
+    g.beginPath();
+    g.arc(wx + r() * ww, wy + wh * (0.45 + 0.55 * r()), S * 0.004 * (0.6 + r()), 0, 6.3);
+    g.fill();
+  }
+  // погода за стеклом: дождь, снег или ясная ночь
+  if (opts.weather === 'rain') rainStreaks(g, S, r, 34, 0.30, [wx, wy, ww, wh]);
+  else if (opts.weather === 'snow') snowfall(g, S, r, 46, 0.60, [wx, wy, ww, wh]);
+  else for (let i = 0; i < 16; i++) {
+    g.fillStyle = 'rgba(242,246,255,' + (0.15 + 0.5 * r()) + ')';
+    g.beginPath();
+    g.arc(wx + r() * ww, wy + r() * wh * 0.7, S * 0.0018 * (0.5 + r()), 0, 6.3);
+    g.fill();
+  }
+  g.strokeStyle = hexA(pal.sil, 0.9);
+  g.lineWidth = S * 0.014;
+  g.strokeRect(wx, wy, ww, wh);
+  g.lineWidth = S * 0.008;
+  g.beginPath();
+  g.moveTo(wx + ww / 2, wy); g.lineTo(wx + ww / 2, wy + wh);
+  g.moveTo(wx, wy + wh / 2); g.lineTo(wx + ww, wy + wh / 2);
+  g.stroke();
+
+  // подоконник: кот сидит на нём (или на стопке книг)
+  if (opts.cat) {
+    const sill = wy + wh;
+    g.fillStyle = hexA(pal.sil, 0.92);
+    g.fillRect(wx - S * 0.02, sill, ww + S * 0.04, S * 0.016);
+    catOnSill(g, S, r, pal, wx + ww * 0.30, sill, S * 0.062);
+  }
+
+  // свет лампы — справа от окна, чтобы не наезжать на ночь за стеклом
+  const lx = Math.min(S * 0.92, wx + ww + S * (0.06 + 0.10 * r()));
+  const ly = S * (0.18 + 0.22 * r());
+  const lamp = g.createRadialGradient(lx, ly, 0, lx, ly, S * 0.44);
+  lamp.addColorStop(0, hexA(pal.warm, 0.55));
+  lamp.addColorStop(0.4, hexA(pal.warm, 0.14));
+  lamp.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = lamp;
+  g.fillRect(0, 0, S, S);
+  g.fillStyle = hexA('#fff3d8', 0.85);
+  g.beginPath();
+  g.ellipse(lx, ly, S * 0.020, S * 0.016, 0, 0, 6.3);
+  g.fill();
+
+  // стол
+  const deskY = S * (0.68 + 0.10 * r());
+  g.fillStyle = hexA(pal.sil, 0.94);
+  g.fillRect(0, deskY, S, S - deskY);
+  g.strokeStyle = hexA(pal.warm, 0.18);
+  g.lineWidth = S * 0.003;
+  g.beginPath(); g.moveTo(0, deskY); g.lineTo(S, deskY); g.stroke();
+
+  // кружка с паром
+  const mx = S * (0.46 + 0.28 * r()), my = deskY - S * 0.055;
+  g.fillStyle = hexA(pal.cool, 0.55);
+  g.beginPath();
+  g.roundRect(mx, my, S * 0.075, S * 0.062, S * 0.012);
+  g.fill();
+  g.strokeStyle = hexA(pal.cool, 0.55);
+  g.lineWidth = S * 0.008;
+  g.beginPath(); g.arc(mx + S * 0.082, my + S * 0.030, S * 0.020, -1.2, 1.2); g.stroke();
+  for (let i = 0; i < 3; i++) {
+    g.strokeStyle = 'rgba(236,224,204,' + (0.05 + 0.07 * r()) + ')';
+    g.lineWidth = S * 0.006;
+    g.beginPath();
+    const sx = mx + S * 0.02 + i * S * 0.016;
+    g.moveTo(sx, my - S * 0.012);
+    g.bezierCurveTo(sx + S * 0.02, my - S * 0.05, sx - S * 0.02, my - S * 0.07, sx + S * 0.01, my - S * 0.11);
+    g.stroke();
+  }
+
+  // растение в углу
+  if (opts.plant) {
+    const px = S * 0.14, py = deskY - S * 0.02;
+    g.strokeStyle = hexA(pal.sil, 0.95);
+    g.lineWidth = S * 0.012;
+    for (let i = 0; i < 7; i++) {
+      const a = -Math.PI / 2 + (i - 3) * 0.28;
+      g.beginPath();
+      g.moveTo(px, py);
+      g.quadraticCurveTo(px + Math.cos(a) * S * 0.09, py + Math.sin(a) * S * 0.12,
+                         px + Math.cos(a) * S * 0.15, py + Math.sin(a) * S * 0.17);
+      g.stroke();
+    }
+    g.fillStyle = hexA(pal.sil, 0.95);
+    g.beginPath();
+    g.roundRect(px - S * 0.045, py, S * 0.09, S * 0.055, S * 0.008);
+    g.fill();
+  }
+
+  // мелочи на столе: книги, кассетник, наушники, ночник — 1-2 случайных предмета
+  const propsPool = ['books', 'deck', 'cans', 'lamp'];
+  for (let i = propsPool.length - 1; i > 0; i--) {
+    const j = Math.floor(r() * (i + 1));
+    const t = propsPool[i]; propsPool[i] = propsPool[j]; propsPool[j] = t;
+  }
+  const onDesk = [propsPool[0]];
+  if (r() < 0.55) onDesk.push(propsPool[1]);
+  for (const item of onDesk) {
+    const ix = S * (0.06 + 0.78 * r());
+    if (item === 'books') {
+      for (let b = 0; b < 3; b++) {
+        const bh = S * 0.014;
+        g.fillStyle = hexA([pal.warm, pal.cool, pal.sil][b], 0.80 + 0.15 * r());
+        g.fillRect(ix, deskY - bh * (b + 1), S * (0.10 + 0.04 * r()), bh);
+      }
+    } else if (item === 'deck') {
+      const dw = S * 0.12, dh = S * 0.045;
+      g.fillStyle = hexA(pal.sil, 0.98);
+      g.fillRect(ix, deskY - dh, dw, dh);
+      g.fillStyle = hexA(pal.cool, 0.45);
+      g.fillRect(ix + dw * 0.08, deskY - dh * 0.78, dw * 0.84, dh * 0.34);
+      for (let c = 0; c < 2; c++) {
+        g.strokeStyle = hexA(pal.warm, 0.55);
+        g.lineWidth = S * 0.003;
+        g.beginPath();
+        g.arc(ix + dw * (0.30 + 0.40 * c), deskY - dh * 0.61, S * 0.010, 0, 6.3);
+        g.stroke();
+      }
+    } else if (item === 'cans') {
+      g.strokeStyle = hexA(pal.sil, 0.98);
+      g.lineWidth = S * 0.007;
+      g.beginPath();
+      g.arc(ix, deskY - S * 0.030, S * 0.032, Math.PI, 0);
+      g.stroke();
+      g.fillStyle = hexA(pal.sil, 0.98);
+      g.fillRect(ix - S * 0.042, deskY - S * 0.030, S * 0.020, S * 0.038);
+      g.fillRect(ix + S * 0.022, deskY - S * 0.030, S * 0.020, S * 0.038);
+    } else {
+      g.strokeStyle = hexA(pal.sil, 0.98);
+      g.lineWidth = S * 0.005;
+      g.beginPath();
+      g.moveTo(ix, deskY); g.lineTo(ix + S * 0.010, deskY - S * 0.075);
+      g.stroke();
+      g.fillStyle = hexA(pal.sil, 0.98);
+      g.beginPath();
+      g.moveTo(ix - S * 0.015, deskY - S * 0.075);
+      g.lineTo(ix + S * 0.045, deskY - S * 0.075);
+      g.lineTo(ix + S * 0.032, deskY - S * 0.115);
+      g.lineTo(ix - S * 0.002, deskY - S * 0.115);
+      g.closePath(); g.fill();
+      const dg = g.createRadialGradient(ix + S * 0.015, deskY - S * 0.055, 0, ix + S * 0.015, deskY - S * 0.055, S * 0.09);
+      dg.addColorStop(0, hexA(pal.warm, 0.40));
+      dg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = dg;
+      g.fillRect(ix - S * 0.09, deskY - S * 0.16, S * 0.22, S * 0.22);
+    }
+  }
+
+  // силуэт со спины: голова и плечи за столом
+  if (opts.figure) {
+    const fx = S * 0.34, fy = deskY;
+    g.fillStyle = hexA(pal.sil, 0.97);
+    g.beginPath();
+    g.arc(fx, fy - S * 0.155, S * 0.062, 0, 6.3);
+    g.fill();
+    g.beginPath();
+    g.moveTo(fx - S * 0.115, fy);
+    g.quadraticCurveTo(fx, fy - S * 0.115, fx + S * 0.115, fy);
+    g.lineTo(fx + S * 0.115, fy + S * 0.02);
+    g.lineTo(fx - S * 0.115, fy + S * 0.02);
+    g.closePath();
+    g.fill();
+    // наушники
+    g.strokeStyle = hexA(pal.warm, 0.5);
+    g.lineWidth = S * 0.008;
+    g.beginPath();
+    g.arc(fx, fy - S * 0.155, S * 0.070, Math.PI * 1.15, Math.PI * 1.85);
+    g.stroke();
+  }
+}
+
+function field(g, S, r, pal, weather) {
+  // звёзды (в ясную ночь их больше, чем в снег)
+  const stars = weather === 'clear' ? 150 : weather === 'snow' ? 30 : 60;
+  for (let i = 0; i < stars; i++) {
+    g.fillStyle = 'rgba(236,224,204,' + (0.10 + 0.55 * r()) + ')';
+    g.beginPath();
+    g.arc(r() * S, r() * S * 0.55, S * 0.0016 * (0.5 + r()), 0, 6.3);
+    g.fill();
+  }
+  // луна
+  const mx = S * (0.6 + 0.25 * r()), my = S * (0.14 + 0.12 * r());
+  const mg = g.createRadialGradient(mx, my, 0, mx, my, S * 0.20);
+  mg.addColorStop(0, hexA('#fff4de', 0.55));
+  mg.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = mg;
+  g.beginPath(); g.arc(mx, my, S * 0.20, 0, 6.3); g.fill();
+  g.fillStyle = hexA('#fff6e4', 0.9);
+  g.beginPath(); g.arc(mx, my, S * 0.035, 0, 6.3); g.fill();
+  // холмы слоями
+  for (let i = 0; i < 3; i++) {
+    const y = S * (0.58 + i * 0.11) + S * 0.03 * r();
+    g.fillStyle = hexA(pal.sil, 0.55 + i * 0.22);
+    g.beginPath();
+    g.moveTo(0, S);
+    g.lineTo(0, y);
+    for (let x = 0; x <= S; x += S / 4) {
+      g.quadraticCurveTo(x + S / 8, y - S * (0.03 + 0.05 * r()), x + S / 4, y + S * 0.01 * r());
+    }
+    g.lineTo(S, S);
+    g.closePath();
+    g.fill();
+  }
+  // туман
+  for (let i = 0; i < 4; i++) {
+    const fy = S * (0.60 + 0.10 * i);
+    const fg = g.createLinearGradient(0, fy - S * 0.05, 0, fy + S * 0.08);
+    fg.addColorStop(0, 'rgba(200,205,220,0)');
+    fg.addColorStop(0.5, 'rgba(200,205,220,' + (0.05 + 0.05 * r()) + ')');
+    fg.addColorStop(1, 'rgba(200,205,220,0)');
+    g.fillStyle = fg;
+    g.fillRect(0, fy - S * 0.05, S, S * 0.13);
+  }
+}
+
+// Пляж: солнце уходит в воду, дорожка отражения, пальмы силуэтом
+function beach(g, S, r, pal) {
+  const hz = S * (0.50 + 0.08 * r());
+  const sea = g.createLinearGradient(0, hz, 0, S);
+  sea.addColorStop(0, hexA(pal.cool, 0.55));
+  sea.addColorStop(0.5, hexA(pal.cool, 0.28));
+  sea.addColorStop(1, hexA(pal.sil, 0.95));
+  g.fillStyle = sea;
+  g.fillRect(0, hz, S, S - hz);
+
+  const sx = S * (0.26 + 0.46 * r()), sy = hz - S * (0.05 + 0.11 * r());
+  const glow = g.createRadialGradient(sx, sy, 0, sx, sy, S * 0.44);
+  glow.addColorStop(0, hexA(pal.warm, 0.60));
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = glow; g.fillRect(0, 0, S, S);
+  g.fillStyle = hexA('#ffe9c4', 0.90);
+  g.beginPath(); g.arc(sx, sy, S * (0.042 + 0.022 * r()), 0, 6.3); g.fill();
+
+  for (let i = 0; i < 42; i++) {                       // дорожка отражения
+    const t = i / 42;
+    const w = S * (0.05 + 0.30 * t) * (0.5 + 0.5 * r());
+    g.fillStyle = hexA(pal.warm, (0.22 + 0.18 * r()) * (1 - t * 0.6));
+    g.fillRect(sx - w / 2 + (r() - 0.5) * S * 0.06, hz + (S - hz) * t, w, S * 0.006 * (0.6 + r()));
+  }
+  for (let i = 0; i < 26; i++) {                       // блики вне дорожки
+    g.fillStyle = hexA(pal.cool, 0.05 + 0.12 * r());
+    g.fillRect(r() * S, hz + r() * (S - hz), S * (0.02 + 0.06 * r()), S * 0.0035);
+  }
+  const np = 1 + Math.floor(r() * 2);                  // пальмы
+  for (let p = 0; p < np; p++) {
+    const px = p === 0 ? S * (0.05 + 0.10 * r()) : S * (0.82 + 0.11 * r());
+    const py = S * 1.01, h = S * (0.28 + 0.16 * r()), lean = (r() - 0.5) * S * 0.10;
+    g.strokeStyle = hexA(pal.sil, 0.97);
+    g.lineWidth = S * (0.009 + 0.005 * r());
+    g.beginPath();
+    g.moveTo(px, py);
+    g.quadraticCurveTo(px + lean * 0.4, py - h * 0.6, px + lean, py - h);
+    g.stroke();
+    const tx = px + lean, ty = py - h;
+    g.lineWidth = S * 0.0075;
+    for (let f = 0; f < 6; f++) {
+      const a = -Math.PI / 2 + (f - 2.5) * 0.42;
+      g.beginPath();
+      g.moveTo(tx, ty);
+      g.quadraticCurveTo(tx + Math.cos(a) * S * 0.11, ty + Math.sin(a) * S * 0.06,
+                         tx + Math.cos(a) * S * 0.18, ty + Math.sin(a) * S * 0.11 + S * 0.05);
+      g.stroke();
+    }
+  }
+}
+
+// Собор: колонны, витраж с аркой, лучи света, каменный пол
+function cathedral(g, S, r, pal) {
+  g.fillStyle = hexA(pal.sil, 0.88);
+  g.fillRect(0, 0, S, S);
+
+  const wx = S * (0.30 + 0.22 * r()), ww = S * (0.15 + 0.09 * r());
+  const wy = S * (0.08 + 0.05 * r()), wh = S * (0.44 + 0.14 * r());
+  // окно с аркой
+  const arch = () => {
+    g.beginPath();
+    g.moveTo(wx, wy + wh);
+    g.lineTo(wx, wy + ww / 2);
+    g.arc(wx + ww / 2, wy + ww / 2, ww / 2, Math.PI, 0);
+    g.lineTo(wx + ww, wy + wh);
+    g.closePath();
+  };
+  arch(); g.save(); g.clip();
+  const cells = 10;
+  for (let i = 0; i < cells; i++) {
+    for (let j = 0; j < cells; j++) {
+      const c = r() < 0.55 ? pal.warm : pal.cool;
+      g.fillStyle = hexA(c, 0.35 + 0.45 * r());
+      g.fillRect(wx + (i * ww) / cells, wy + (j * wh) / cells, ww / cells + 0.6, wh / cells + 0.6);
+    }
+  }
+  g.restore();
+  g.strokeStyle = hexA(pal.sil, 0.95);
+  g.lineWidth = S * 0.010; // рама
+  arch(); g.stroke();
+
+  // лучи света из окна на пол
+  g.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 3; i++) {
+    const bx = wx + ww * (0.2 + 0.3 * i), spread = S * (0.10 + 0.06 * r());
+    const lg = g.createLinearGradient(bx, wy + wh, bx + spread * 0.4, S);
+    lg.addColorStop(0, hexA(pal.warm, 0.16 + 0.10 * r()));
+    lg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = lg;
+    g.beginPath();
+    g.moveTo(bx - ww * 0.10, wy + wh);
+    g.lineTo(bx + ww * 0.10, wy + wh);
+    g.lineTo(bx + spread, S);
+    g.lineTo(bx - spread * 0.6, S);
+    g.closePath();
+    g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+
+  // колонны
+  const cols = 3 + Math.floor(r() * 2);
+  for (let i = 0; i < cols; i++) {
+    const cw = S * (0.07 + 0.035 * r());
+    const x = (i === 0) ? S * (0.01 + 0.05 * r()) : S * (0.80 + 0.16 * r()) - (i - 1) * S * 0.03;
+    g.fillStyle = hexA(pal.sil, 1);
+    g.fillRect(x, 0, cw, S);
+    g.fillStyle = hexA(pal.cool, 0.06 + 0.05 * r());
+    g.fillRect(x + cw * 0.72, 0, cw * 0.28, S);
+  }
+
+  // каменные плиты пола
+  const fy = S * (0.80 + 0.04 * r());
+  g.fillStyle = hexA(pal.sil, 0.96);
+  g.fillRect(0, fy, S, S - fy);
+  for (let i = 0; i < 8; i++) {
+    const x = r() * S;
+    g.strokeStyle = hexA(pal.cool, 0.05 + 0.06 * r());
+    g.lineWidth = S * 0.0022;
+    g.beginPath(); g.moveTo(x, fy); g.lineTo(x + (r() - 0.5) * S * 0.10, S); g.stroke();
+  }
+  // свечи
+  for (let i = 0; i < 2 + Math.floor(r() * 3); i++) {
+    const cx = S * (0.08 + 0.84 * r()), cy = fy + S * (0.01 + 0.10 * r());
+    const cg = g.createRadialGradient(cx, cy, 0, cx, cy, S * 0.10);
+    cg.addColorStop(0, hexA(pal.warm, 0.50));
+    cg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = cg; g.beginPath(); g.arc(cx, cy, S * 0.10, 0, 6.3); g.fill();
+    g.fillStyle = hexA('#fff0cf', 0.92);
+    g.beginPath(); g.arc(cx, cy, S * 0.006, 0, 6.3); g.fill();
+  }
+}
+
+// Аркада: ряды автоматов, светящиеся CRT-экраны, отблеск на полу
+function arcade(g, S, r, pal) {
+  g.fillStyle = hexA(pal.sil, 0.94);
+  g.fillRect(0, 0, S, S);
+  // неоновая полоса под потолком
+  const ny = S * (0.10 + 0.06 * r());
+  const ng = g.createLinearGradient(0, ny - S * 0.05, 0, ny + S * 0.08);
+  ng.addColorStop(0, 'rgba(0,0,0,0)');
+  ng.addColorStop(0.5, hexA(pal.cool, 0.30));
+  ng.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = ng; g.fillRect(0, ny - S * 0.05, S, S * 0.13);
+
+  const floorY = S * (0.66 + 0.08 * r());
+  const rows = 1 + Math.floor(r() * 2);
+  for (let row = 0; row < rows; row++) {
+    const n = 3 + Math.floor(r() * 3);
+    const k = row === 0 ? 1 : 0.74;                    // дальний ряд мельче
+    for (let i = 0; i < n; i++) {
+      const cw = S * 0.155 * k, ch = S * 0.34 * k;
+      const x = S * (0.05 + (0.90 / n) * i) + (r() - 0.5) * S * 0.02;
+      const y = floorY - ch - row * S * 0.02;
+      g.fillStyle = hexA(pal.sil, 1);
+      if (g.roundRect) { g.beginPath(); g.roundRect(x, y, cw, ch, S * 0.008); g.fill(); }
+      else g.fillRect(x, y, cw, ch);
+      // экран
+      const sc = r() < 0.6 ? pal.warm : pal.cool;
+      const sh = ch * 0.30;
+      const sg = g.createLinearGradient(0, y + ch * 0.10, 0, y + ch * 0.10 + sh);
+      sg.addColorStop(0, hexA(sc, 0.55 + 0.30 * r()));
+      sg.addColorStop(1, hexA(sc, 0.18));
+      g.fillStyle = sg;
+      g.fillRect(x + cw * 0.14, y + ch * 0.10, cw * 0.72, sh);
+      for (let l = 0; l < 5; l++) {                    // строки развёртки
+        g.fillStyle = 'rgba(0,0,0,' + (0.10 + 0.16 * r()) + ')';
+        g.fillRect(x + cw * 0.14, y + ch * 0.10 + (l * sh) / 5, cw * 0.72, S * 0.0016);
+      }
+      // панель управления
+      g.fillStyle = hexA(pal.cool, 0.20 + 0.20 * r());
+      g.fillRect(x + cw * 0.20, y + ch * 0.52, cw * 0.60, S * 0.006);
+      // свечение вокруг экрана
+      const eg = g.createRadialGradient(x + cw / 2, y + ch * 0.25, 0, x + cw / 2, y + ch * 0.25, S * 0.20 * k);
+      eg.addColorStop(0, hexA(sc, 0.28));
+      eg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = eg;
+      g.fillRect(x - S * 0.10, y - S * 0.10, cw + S * 0.20, ch + S * 0.20);
+    }
+  }
+  // пол и отблески
+  g.fillStyle = hexA(pal.sil, 1);
+  g.fillRect(0, floorY, S, S - floorY);
+  for (let i = 0; i < 22; i++) {
+    g.fillStyle = hexA(r() < 0.6 ? pal.warm : pal.cool, 0.05 + 0.16 * r());
+    g.fillRect(r() * S, floorY + r() * (S - floorY), S * (0.01 + 0.05 * r()), S * (0.01 + 0.05 * r()));
+  }
+  // жетонщик / игрок силуэтом
+  if (r() < 0.6) {
+    const px = S * (0.18 + 0.62 * r()), py = floorY;
+    g.fillStyle = hexA(pal.sil, 0.98);
+    g.beginPath(); g.arc(px, py - S * 0.13, S * 0.045, 0, 6.3); g.fill();
+    g.beginPath();
+    g.moveTo(px - S * 0.075, py);
+    g.quadraticCurveTo(px, py - S * 0.095, px + S * 0.075, py);
+    g.closePath(); g.fill();
+  }
+}
+
+// Торговый центр: стеклянный атриум, плитка пола в перспективе, фонтан
+function mall(g, S, r, pal) {
+  const hz = S * (0.30 + 0.08 * r());
+  // небо над стеклом
+  const sg = g.createLinearGradient(0, 0, 0, hz);
+  sg.addColorStop(0, pal.sky[0]);
+  sg.addColorStop(1, hexA(pal.cool, 0.35));
+  g.fillStyle = sg; g.fillRect(0, 0, S, hz);
+  // сетка стеклянной крыши
+  g.strokeStyle = hexA(pal.sil, 0.85);
+  g.lineWidth = S * 0.006;
+  const cells = 5 + Math.floor(r() * 4);
+  for (let i = 0; i <= cells; i++) {
+    const x = (i / cells) * S;
+    g.beginPath(); g.moveTo(S / 2, hz - S * 0.10); g.lineTo(x, hz); g.stroke();
+  }
+  for (let j = 1; j <= 3; j++) {
+    const t = j / 4;
+    g.beginPath();
+    g.moveTo(S * 0.5 - S * 0.5 * t, hz - S * 0.10 * (1 - t));
+    g.lineTo(S * 0.5 + S * 0.5 * t, hz - S * 0.10 * (1 - t));
+    g.stroke();
+  }
+  // стены и витрины
+  g.fillStyle = hexA(pal.sil, 0.92);
+  g.fillRect(0, hz, S, S * 0.30);
+  const storeY = hz + S * 0.04, storeH = S * 0.16;
+  for (let i = 0; i < 4; i++) {
+    const w = S * (0.18 + 0.06 * r()), x = S * (0.04 + 0.94 * (i / 4)) * (0.92 + 0.08 * r());
+    g.fillStyle = hexA(r() < 0.6 ? pal.warm : pal.cool, 0.10 + 0.22 * r());
+    g.fillRect(x, storeY, w, storeH);
+    g.fillStyle = hexA(pal.sil, 0.7);
+    g.fillRect(x, storeY, w, S * 0.004);
+  }
+  // пол в перспективе
+  const fy = hz + S * 0.30;
+  const fg = g.createLinearGradient(0, fy, 0, S);
+  fg.addColorStop(0, hexA(pal.cool, 0.16));
+  fg.addColorStop(1, hexA(pal.sil, 0.98));
+  g.fillStyle = fg; g.fillRect(0, fy, S, S - fy);
+  g.strokeStyle = hexA(pal.cool, 0.10);
+  g.lineWidth = S * 0.0022;
+  for (let i = -6; i <= 6; i++) {
+    g.beginPath();
+    g.moveTo(S / 2 + i * S * 0.06, fy);
+    g.lineTo(S / 2 + i * S * 0.34, S);
+    g.stroke();
+  }
+  for (let i = 1; i <= 5; i++) {
+    const y = fy + (S - fy) * (i / 5) * (i / 5);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(S, y); g.stroke();
+  }
+  // фонтан: круг воды и струя
+  const fx = S * (0.30 + 0.40 * r()), fy2 = fy + S * (0.05 + 0.08 * r());
+  g.fillStyle = hexA(pal.cool, 0.22 + 0.18 * r());
+  g.beginPath(); g.ellipse(fx, fy2, S * 0.13, S * 0.045, 0, 0, 6.3); g.fill();
+  g.fillStyle = hexA('#cfe0ee', 0.35);
+  g.beginPath(); g.ellipse(fx, fy2, S * 0.11, S * 0.035, 0, 0, 6.3); g.fill();
+  g.fillStyle = hexA(pal.warm, 0.30);
+  g.fillRect(fx - S * 0.004, fy2 - S * 0.10, S * 0.008, S * 0.10);
+  // пальма в кадке
+  if (r() < 0.7) {
+    const px = S * (0.08 + 0.10 * r()) + (r() < 0.5 ? 0 : S * 0.78), py = fy + S * 0.02;
+    g.strokeStyle = hexA(pal.sil, 0.97); g.lineWidth = S * 0.008;
+    for (let f = 0; f < 6; f++) {
+      const a = -Math.PI / 2 + (f - 2.5) * 0.42;
+      g.beginPath(); g.moveTo(px, py - S * 0.05);
+      g.quadraticCurveTo(px + Math.cos(a) * S * 0.09, py - S * 0.14,
+                         px + Math.cos(a) * S * 0.16, py - S * 0.10);
+      g.stroke();
+    }
+    g.fillStyle = hexA(pal.sil, 0.97);
+    g.beginPath();
+    if (g.roundRect) { g.roundRect(px - S * 0.04, py - S * 0.05, S * 0.08, S * 0.06, S * 0.008); }
+    else g.rect(px - S * 0.04, py - S * 0.05, S * 0.08, S * 0.06);
+    g.fill();
+  }
+}
+
+// Крыша: парапет, бак с водой, антенна, кондиционеры, город внизу
+function rooftop(g, S, r, pal) {
+  const par = S * (0.70 + 0.06 * r());                 // линия парапета
+  // город за парапетом
+  let x = -S * 0.05;
+  while (x < S * 1.05) {
+    const w = S * (0.06 + 0.10 * r());
+    const h = par * (0.18 + 0.42 * r());
+    g.fillStyle = hexA(pal.sil, 0.80);
+    g.fillRect(x, par - h, w, h);
+    for (let j = 0; j < 6; j++) {                      // окна
+      if (r() < 0.35) {
+        g.fillStyle = hexA(r() < 0.7 ? pal.warm : pal.cool, 0.20 + 0.45 * r());
+        g.fillRect(x + r() * (w - S * 0.008), par - h + r() * h * 0.9, S * 0.006, S * 0.009);
+      }
+    }
+    x += w + S * 0.008 * r();
+  }
+  // сам парапет
+  g.fillStyle = hexA(pal.sil, 1);
+  g.fillRect(0, par, S, S - par);
+  g.fillStyle = hexA(pal.warm, 0.10 + 0.08 * r());
+  g.fillRect(0, par, S, S * 0.004);
+  for (let i = 0; i < 6; i++) {                        // швы плит
+    const sx = r() * S;
+    g.strokeStyle = hexA(pal.cool, 0.06 + 0.05 * r());
+    g.lineWidth = S * 0.002;
+    g.beginPath(); g.moveTo(sx, par); g.lineTo(sx + (r() - 0.5) * S * 0.02, S); g.stroke();
+  }
+  // бак с водой на опорах
+  if (r() < 0.7) {
+    const tx = S * (0.10 + 0.70 * r()), ty = par - S * (0.16 + 0.10 * r()), tw = S * (0.13 + 0.06 * r());
+    g.strokeStyle = hexA(pal.sil, 0.98); g.lineWidth = S * 0.008;
+    g.beginPath();
+    g.moveTo(tx - tw * 0.35, par); g.lineTo(tx - tw * 0.20, ty + S * 0.07);
+    g.moveTo(tx + tw * 0.35, par); g.lineTo(tx + tw * 0.20, ty + S * 0.07);
+    g.stroke();
+    g.fillStyle = hexA(pal.sil, 0.98);
+    g.beginPath();
+    g.moveTo(tx - tw * 0.5, ty + S * 0.07);
+    g.lineTo(tx + tw * 0.5, ty + S * 0.07);
+    g.lineTo(tx + tw * 0.42, ty - S * 0.02);
+    g.lineTo(tx - tw * 0.42, ty - S * 0.02);
+    g.closePath(); g.fill();
+    g.beginPath();
+    g.moveTo(tx - tw * 0.42, ty - S * 0.02);
+    g.lineTo(tx, ty - S * 0.09);
+    g.lineTo(tx + tw * 0.42, ty - S * 0.02);
+    g.closePath(); g.fill();
+  }
+  // антенна с красным огнём
+  const ax = S * (0.14 + 0.70 * r()), ah = S * (0.16 + 0.16 * r());
+  g.strokeStyle = hexA(pal.sil, 0.98); g.lineWidth = S * 0.005;
+  g.beginPath(); g.moveTo(ax, par); g.lineTo(ax, par - ah); g.stroke();
+  for (let i = 1; i <= 3; i++) {
+    g.beginPath();
+    g.moveTo(ax - S * 0.022, par - ah * (i / 4));
+    g.lineTo(ax + S * 0.022, par - ah * (i / 4));
+    g.stroke();
+  }
+  const rg = g.createRadialGradient(ax, par - ah, 0, ax, par - ah, S * 0.05);
+  rg.addColorStop(0, 'rgba(255,90,70,0.75)');
+  rg.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = rg; g.beginPath(); g.arc(ax, par - ah, S * 0.05, 0, 6.3); g.fill();
+  // кондиционеры
+  for (let i = 0; i < 1 + Math.floor(r() * 2); i++) {
+    const ux = S * (0.08 + 0.70 * r()), uw = S * (0.10 + 0.05 * r()), uh = S * 0.05;
+    const uy = par - uh - S * (0.01 + 0.06 * r());
+    g.fillStyle = hexA(pal.sil, 0.98);
+    g.fillRect(ux, uy, uw, uh);
+    g.strokeStyle = hexA(pal.cool, 0.18); g.lineWidth = S * 0.002;
+    for (let l = 0; l < 3; l++) {
+      g.beginPath();
+      g.moveTo(ux + uw * 0.15, uy + uh * (0.25 + l * 0.25));
+      g.lineTo(ux + uw * 0.85, uy + uh * (0.25 + l * 0.25));
+      g.stroke();
+    }
+  }
+}
+
+// Поезд: рама окна, поручень, смазанные огни за стеклом
+function train(g, S, r, pal) {
+  g.fillStyle = hexA(pal.sil, 0.96);                   // салон
+  g.fillRect(0, 0, S, S);
+  const wx = S * (0.08 + 0.06 * r()), wy = S * (0.10 + 0.06 * r());
+  const ww = S * (0.72 + 0.14 * r()), wh = S * (0.46 + 0.10 * r());
+  // ночь за стеклом
+  const ng = g.createLinearGradient(0, wy, 0, wy + wh);
+  ng.addColorStop(0, hexA(pal.sky[0], 0.95));
+  ng.addColorStop(1, hexA(pal.cool, 0.45));
+  g.fillStyle = ng; g.fillRect(wx, wy, ww, wh);
+  // смазанные огни (движение)
+  for (let i = 0; i < 16; i++) {
+    const y = wy + wh * (0.35 + 0.62 * r());
+    const lw = ww * (0.10 + 0.55 * r());
+    const x = wx + r() * ww;
+    const col = r() < 0.6 ? pal.warm : pal.cool;
+    const lg = g.createLinearGradient(x - lw, y, x + lw, y);
+    lg.addColorStop(0, 'rgba(0,0,0,0)');
+    lg.addColorStop(0.5, hexA(col, 0.35 + 0.40 * r()));
+    lg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = lg;
+    g.fillRect(x - lw, y, lw * 2, S * (0.006 + 0.014 * r()));
+  }
+  // фонари столбов
+  for (let i = 0; i < 4; i++) {
+    const px = wx + ww * r();
+    const pg = g.createLinearGradient(0, wy, 0, wy + wh);
+    pg.addColorStop(0, hexA(pal.warm, 0.30));
+    pg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = pg;
+    g.fillRect(px - S * 0.004, wy, S * 0.008, wh);
+  }
+  // стёкла: рама, блик, капли
+  g.strokeStyle = hexA(pal.sil, 0.98);
+  g.lineWidth = S * 0.018;
+  g.strokeRect(wx, wy, ww, wh);
+  g.save();
+  g.beginPath(); g.rect(wx, wy, ww, wh); g.clip();
+  g.strokeStyle = 'rgba(236,224,204,0.10)';
+  g.lineWidth = S * 0.02;
+  g.beginPath();
+  g.moveTo(wx + ww * 0.1, wy + wh); g.lineTo(wx + ww * 0.42, wy);
+  g.stroke();
+  if (r() < 0.6) {
+    g.restore();
+    rainStreaks(g, S, r, 30, 0.22, [wx, wy, ww, wh]);
+  } else g.restore();
+  // поручень и спинка сиденья
+  const ry = wy + wh + S * (0.10 + 0.05 * r());
+  g.strokeStyle = hexA(pal.cool, 0.35); g.lineWidth = S * 0.008;
+  g.beginPath(); g.moveTo(S * 0.04, ry); g.lineTo(S * 0.96, ry); g.stroke();
+  g.strokeStyle = hexA(pal.sil, 0.95); g.lineWidth = S * 0.006;
+  g.beginPath(); g.moveTo(S * 0.14, ry); g.lineTo(S * 0.14, wy - S * 0.02);
+  g.moveTo(S * 0.86, ry); g.lineTo(S * 0.86, wy - S * 0.02);
+  g.stroke();
+  const sy = S * (0.84 + 0.06 * r());
+  g.fillStyle = hexA(pal.sil, 1);
+  g.fillRect(0, sy, S, S - sy);
+  g.fillStyle = hexA(pal.cool, 0.12 + 0.08 * r());
+  g.fillRect(0, sy, S, S * 0.004);
+  // пассажир силуэтом
+  if (r() < 0.55) {
+    const fx = S * (0.16 + 0.50 * r());
+    g.fillStyle = hexA(pal.sil, 0.99);
+    g.beginPath(); g.arc(fx, sy - S * 0.20, S * 0.048, 0, 6.3); g.fill();
+    g.beginPath();
+    g.moveTo(fx - S * 0.085, sy);
+    g.quadraticCurveTo(fx, sy - S * 0.16, fx + S * 0.085, sy);
+    g.closePath(); g.fill();
+  }
+}
+
+// Крупный план окна: стекло во весь кадр, капли, город за ним, подоконник
+function windowView(g, S, r, pal, weather) {
+  g.fillStyle = hexA(pal.sil, 0.96);                   // стена вокруг рамы
+  g.fillRect(0, 0, S, S);
+
+  const wx = S * (0.07 + 0.09 * r()), wy = S * (0.10 + 0.08 * r());
+  const ww = S * (0.72 + 0.16 * r()), wh = S * (0.48 + 0.14 * r());
+  // ночь за стеклом
+  const ng = g.createLinearGradient(0, wy, 0, wy + wh);
+  ng.addColorStop(0, hexA(pal.sky[0], 0.98));
+  ng.addColorStop(1, hexA(pal.cool, 0.40));
+  g.fillStyle = ng; g.fillRect(wx, wy, ww, wh);
+  // силуэт города в глубине
+  let x = wx;
+  while (x < wx + ww) {
+    const bw = ww * (0.06 + 0.10 * r()), bh = wh * (0.14 + 0.40 * r());
+    g.fillStyle = hexA(pal.sil, 0.85);
+    g.fillRect(x, wy + wh - bh, bw, bh);
+    if (r() < 0.5) {
+      g.fillStyle = hexA(r() < 0.7 ? pal.warm : pal.cool, 0.25 + 0.45 * r());
+      g.fillRect(x + bw * 0.3, wy + wh - bh + bh * 0.3 * r(), S * 0.006, S * 0.009);
+    }
+    x += bw;
+  }
+  // огни и звёзды за стеклом
+  bokeh(g, S, r, pal, 5 + Math.floor(r() * 6));
+  if (weather === 'clear') for (let i = 0; i < 90; i++) {
+    g.fillStyle = 'rgba(236,224,204,' + (0.10 + 0.5 * r()) + ')';
+    g.fillRect(wx + r() * ww, wy + r() * wh * 0.5, S * 0.0018, S * 0.0018);
+  }
+
+  g.save();
+  g.beginPath(); g.rect(wx, wy, ww, wh); g.clip();
+  // осадки
+  if (weather === 'rain') {
+    rainStreaks(g, S, r, 70, 0.28, [wx, wy, ww, wh]);
+    for (let i = 0; i < 90; i++) {                     // капли на стекле
+      const dx = wx + r() * ww, dy = wy + r() * wh;
+      const ds = S * (0.0016 + 0.0035 * r());
+      g.fillStyle = 'rgba(236,240,250,' + (0.10 + 0.22 * r()) + ')';
+      g.beginPath(); g.ellipse(dx, dy, ds, ds * (1.3 + r()), 0, 0, 6.3); g.fill();
+      g.strokeStyle = 'rgba(255,255,255,' + (0.06 + 0.10 * r()) + ')';
+      g.lineWidth = S * 0.0012;
+      g.beginPath(); g.ellipse(dx, dy, ds * 1.1, ds * 1.4, 0, 0, 6.3); g.stroke();
+    }
+  } else if (weather === 'snow') snowfall(g, S, r, 90, 0.55, [wx, wy, ww, wh]);
+  // мягкие блики на стекле
+  for (let i = 0; i < 3; i++) {
+    const bx = wx + r() * ww;
+    const bg = g.createLinearGradient(bx, wy, bx + ww * 0.30, wy + wh);
+    bg.addColorStop(0, 'rgba(236,224,204,0)');
+    bg.addColorStop(0.5, 'rgba(236,224,204,' + (0.03 + 0.05 * r()) + ')');
+    bg.addColorStop(1, 'rgba(236,224,204,0)');
+    g.fillStyle = bg;
+    g.fillRect(bx, wy, ww * 0.34, wh);
+  }
+  g.restore();
+
+  // рама и переплёт
+  g.strokeStyle = hexA(pal.sil, 1);
+  g.lineWidth = S * 0.020;
+  g.strokeRect(wx, wy, ww, wh);
+  g.lineWidth = S * 0.010;
+  g.beginPath();
+  const bars = 1 + Math.floor(r() * 2);
+  for (let i = 1; i <= bars; i++) {
+    const bx = wx + (ww * i) / (bars + 1);
+    g.moveTo(bx, wy); g.lineTo(bx, wy + wh);
+  }
+  if (r() < 0.6) { g.moveTo(wx, wy + wh * 0.5); g.lineTo(wx + ww, wy + wh * 0.5); }
+  g.stroke();
+
+  // подоконник: кот, кружка или растение
+  const sill = wy + wh;
+  g.fillStyle = hexA(pal.sil, 1);
+  g.fillRect(wx - S * 0.03, sill, ww + S * 0.06, S * (0.02 + 0.02 * r()));
+  const roll = r();
+  if (roll < 0.45) catOnSill(g, S, r, pal, wx + ww * (0.22 + 0.30 * r()), sill, S * 0.070);
+  else if (roll < 0.75) {
+    const bx = wx + ww * (0.20 + 0.40 * r());
+    for (let b = 0; b < 3; b++) {
+      g.fillStyle = hexA([pal.warm, pal.cool, pal.sil][b], 0.85);
+      g.fillRect(bx, sill - S * 0.012 * (b + 1), S * (0.10 + 0.03 * r()), S * 0.012);
+    }
+  } else {
+    const px = wx + ww * (0.20 + 0.45 * r());
+    g.strokeStyle = hexA(pal.sil, 0.97); g.lineWidth = S * 0.008;
+    for (let f = 0; f < 6; f++) {
+      const a = -Math.PI / 2 + (f - 2.5) * 0.42;
+      g.beginPath(); g.moveTo(px, sill - S * 0.02);
+      g.quadraticCurveTo(px + Math.cos(a) * S * 0.08, sill - S * 0.10,
+                         px + Math.cos(a) * S * 0.14, sill - S * 0.07);
+      g.stroke();
+    }
+  }
+  // свет лампы из комнаты падает на стену
+  const lx = S * (0.10 + 0.80 * r()), ly = S * (0.72 + 0.20 * r());
+  const lg = g.createRadialGradient(lx, ly, 0, lx, ly, S * 0.38);
+  lg.addColorStop(0, hexA(pal.warm, 0.30));
+  lg.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = lg; g.fillRect(0, 0, S, S);
+}
+
+function glitch(g, S, r, pal) {
+  // разрезаем кадр на полосы и разъезжаем их
+  for (let i = 0; i < 26; i++) {
+    const y = r() * S, h = S * (0.008 + 0.05 * r());
+    const dx = (r() - 0.5) * S * 0.18;
+    g.drawImage(g.canvas, 0, y * (g.canvas.height / S), g.canvas.width, h * (g.canvas.height / S),
+                dx, y, S, h);
+  }
+  // цветные сдвиги
+  g.globalCompositeOperation = 'screen';
+  g.fillStyle = hexA(pal.cool, 0.10);
+  g.fillRect(-S * 0.01, 0, S, S);
+  g.fillStyle = hexA(pal.warm, 0.08);
+  g.fillRect(S * 0.012, 0, S, S);
+  g.globalCompositeOperation = 'source-over';
+  // пиксельные блоки и «дизеринг»
+  for (let i = 0; i < 70; i++) {
+    const bx = Math.floor(r() * 32) * (S / 32);
+    const by = Math.floor(r() * 32) * (S / 32);
+    const bs = (S / 32) * (1 + Math.floor(r() * 3));
+    g.fillStyle = r() < 0.5 ? hexA(pal.sil, 0.5 + 0.4 * r()) : hexA(pal.warm, 0.10 + 0.25 * r());
+    g.fillRect(bx, by, bs, bs);
+  }
+  // развёртка
+  for (let y = 0; y < S; y += 3) {
+    g.fillStyle = 'rgba(0,0,0,' + (0.06 + 0.10 * r()) + ')';
+    g.fillRect(0, y, S, 1);
+  }
+}
+
+// Общая плёночная обработка: зерно, пыль, царапины, виньетка, грейд.
+// still=true — рисуем только постоянное (грейд и виньетку): подвижную плёнку
+// (осадки, зерно, пыль, ссадины) накладываем покадрово поверх, чтобы она дышала.
+function post(g, S, r, pal, weather, tint, still) {
+  if (!still) {
+    if (weather === 'rain') rainStreaks(g, S, r, 90, 0.10);
+    else if (weather === 'snow') snowfall(g, S, r, 140, 0.32);
+    // зерно
+    g.save();
+    g.globalCompositeOperation = 'overlay';
+    g.globalAlpha = 0.20;
+    const tile = grain();
+    for (let y = 0; y < S; y += 128) for (let x = 0; x < S; x += 128) g.drawImage(tile, x, y);
+    g.restore();
+    // пыль
+    for (let i = 0; i < 130; i++) {
+      g.fillStyle = 'rgba(240,232,214,' + (0.05 + 0.30 * r()) + ')';
+      const s = S * (0.0012 + 0.0035 * r());
+      g.fillRect(r() * S, r() * S, s, s);
+    }
+    // царапины ленты
+    for (let i = 0; i < 3; i++) {
+      const x = r() * S;
+      g.strokeStyle = 'rgba(236,224,204,' + (0.03 + 0.06 * r()) + ')';
+      g.lineWidth = S * 0.0015;
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x + (r() - 0.5) * S * 0.02, S);
+      g.stroke();
+    }
+  }
+  // грейд кадра: тёплая лампа и холодная ночь в разных пропорциях
+  g.globalCompositeOperation = 'soft-light';
+  if (tint && tint.cool) {
+    g.fillStyle = hexA(pal.cool, tint.cool);
+    g.fillRect(0, 0, S, S);
+  }
+  g.fillStyle = hexA(pal.warm, tint ? tint.warm : 0.07);
+  g.fillRect(0, 0, S, S);
+  g.globalCompositeOperation = 'source-over';
+  // виньетка
+  const vg = g.createRadialGradient(S / 2, S / 2, S * 0.30, S / 2, S / 2, S * 0.78);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.60)');
+  g.fillStyle = vg;
+  g.fillRect(0, 0, S, S);
+}
+
+// Маскот жанра: силуэт кота кочует по сценам и держит узнаваемость
+// (у Chillhop были звери, у Lofi Girl — девушка с котом).
+function mascot(g, x, y, s) {
+  g.save();
+  g.translate(x, y);
+  g.scale(s, s);
+  g.fillStyle = 'rgba(11,8,15,0.84)';
+  g.strokeStyle = 'rgba(11,8,15,0.84)';
+  g.lineCap = 'round';
+  g.beginPath();                       // тело
+  g.moveTo(-15, 0);
+  g.bezierCurveTo(-19, -17, -11, -29, 0, -29);
+  g.bezierCurveTo(11, -29, 19, -17, 15, 0);
+  g.closePath(); g.fill();
+  g.beginPath(); g.arc(0, -37, 10.5, 0, 6.3); g.fill();   // голова
+  g.beginPath();                       // уши
+  g.moveTo(-9.5, -45); g.lineTo(-12.5, -56); g.lineTo(-2.5, -48); g.closePath(); g.fill();
+  g.beginPath();
+  g.moveTo(9.5, -45); g.lineTo(12.5, -56); g.lineTo(2.5, -48); g.closePath(); g.fill();
+  g.lineWidth = 4.6;                   // хвост
+  g.beginPath();
+  g.moveTo(14, -4); g.bezierCurveTo(32, -6, 34, -25, 22, -31); g.stroke();
+  g.restore();
+}
+// На каком «полу» стоит кот в каждой сцене
+const MASCOT_GROUND = {
+  room: 0.88, cafe: 0.88, window: 0.83, city: 0.67, neon: 0.61,
+  field: 0.89, beach: 0.91, rooftop: 0.77, train: 0.85,
+};
+const MASCOT_INDOOR = ['room', 'cafe', 'window'];
+
+
+let coverBase = null;   // статичная сцена: перерисовывается только на смене трека
+let coverAnim = null;   // параметры подвижной плёнки поверх неё
+let coverTick = 0;
+let coverShot = null;   // снимок готового кадра { seed, ready } — его и кладём в файл
+
+function drawCover(t) {
+  if (!t) return;
+  const S = 512;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  if (!coverBase) coverBase = document.createElement('canvas');
+  coverBase.width = S * dpr;
+  coverBase.height = S * dpr;
+  const g = coverBase.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, S, S);
+  coverCv.width = S * dpr;
+  coverCv.height = S * dpr;
+
+  const r = mulberry32(t.seed);
+  const pal = PALS[t.mood] || PALS.dusty;
+  const scenes = SCENE[t.mood] || ['room'];
+  const scene = scenes[Math.min(scenes.length - 1, Math.floor(r() * scenes.length))];
+  const tint = TINTS[Math.min(TINTS.length - 1, Math.floor(r() * TINTS.length))];
+  // Погода — ещё одна ось: дождь (визитка жанра) чаще, но бывает снег и ясная ночь.
+  // В закрытых сценах осадки идут только за стеклом, поэтому верхний слой там не рисуем.
+  const indoor = ['glitch','arcade','cathedral','mall','train'];
+  const weather = indoor.indexOf(scene) >= 0 ? 'clear'
+    : (['rain','rain','snow','clear'])[Math.min(3, Math.floor(r() * 4))];
+  const props = r();
+
+  sky(g, S, r, pal);
+  if (scene === 'city') {
+    city(g, S, r, pal, 0.64);
+    if (weather === 'rain') wetGround(g, S, r, pal, 0.64);
+  } else if (scene === 'neon') {
+    city(g, S, r, pal, 0.58);
+    wetGround(g, S, r, pal, 0.58);
+    g.fillStyle = hexA(pal.warm, 0.9);
+    g.beginPath(); g.arc(S * 0.80, S * 0.20, S * 0.012, 0, 6.3); g.fill();
+    const lg = g.createRadialGradient(S * 0.80, S * 0.20, 0, S * 0.80, S * 0.20, S * 0.28);
+    lg.addColorStop(0, hexA(pal.warm, 0.40));
+    lg.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = lg; g.fillRect(0, 0, S, S);
+  } else if (scene === 'field') field(g, S, r, pal, weather);
+  else if (scene === 'glitch') glitch(g, S, r, pal);
+  else if (scene === 'beach') beach(g, S, r, pal);
+  else if (scene === 'cathedral') cathedral(g, S, r, pal);
+  else if (scene === 'arcade') arcade(g, S, r, pal);
+  else if (scene === 'mall') mall(g, S, r, pal);
+  else if (scene === 'rooftop') rooftop(g, S, r, pal);
+  else if (scene === 'train') train(g, S, r, pal);
+  else if (scene === 'window') windowView(g, S, r, pal, weather);
+  else interior(g, S, r, pal, {
+    plant: scene === 'room', figure: scene === 'cafe',
+    weather, cat: props < 0.35,
+  });
+
+  // огни боке поверх города — примерно в половине кадров
+  if ((scene === 'city' || scene === 'neon') && props > 0.5) bokeh(g, S, r, pal, 6 + Math.floor(r() * 7));
+
+  // Маскот: силуэт кота в части кадров — узнаваемость жанра
+  const ground = MASCOT_GROUND[scene];
+  if (ground) {
+    const sillCat = MASCOT_INDOOR.indexOf(scene) >= 0 && props < 0.35;
+    if (!sillCat && r() < 0.62) {
+      const far = (scene === 'city' || scene === 'neon' || scene === 'rooftop');
+      mascot(g, S * (r() < 0.5 ? 0.16 : 0.84), S * ground, (S / 512) * (far ? 0.6 : 1.0));
+    }
+  }
+
+  post(g, S, r, pal, weather, tint, true);   // статика: без подвижной плёнки
+
+  // Подпись на вкладыше — от руки, как на кассетной этикетке
+  g.strokeStyle = 'rgba(240,232,214,0.26)';
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(26, S - 44); g.lineTo(S - 26, S - 44); g.stroke();
+  g.font = '600 23px "Caveat", "Segoe Script", cursive';
+  g.fillStyle = 'rgba(243,235,218,0.92)';
+  g.textAlign = 'left';
+  g.fillText(t.name, 26, S - 21);
+
+  // Подвижная плёнка: осадки, зерно, пыль, царапины, дыхание лампы
+  const drops = [];
+  const dn = weather === 'rain' ? 46 : weather === 'snow' ? 64 : 0;
+  for (let i = 0; i < dn; i++) {
+    drops.push({
+      x: r(), y: r(),
+      v: weather === 'rain' ? 0.55 + r() * 0.75 : 0.05 + r() * 0.10,
+      a: weather === 'rain' ? 0.05 + r() * 0.10 : 0.20 + r() * 0.30,
+      w: weather === 'rain' ? S * (0.0009 + r() * 0.0012) : S * (0.0013 + r() * 0.0026),
+      len: 0.05 + r() * 0.09,
+      p: r() * 6.28,
+    });
+  }
+  coverAnim = {
+    weather, pal, drops,
+    // Кадр плёнки считаем от зерна трека: тот же трек — та же картинка
+    seed: t.seed,
+    scratch: { x: r(), dx: (r() - 0.5) * 0.02, a: 0.05 },
+  };
+  coverTick = 0;
+  coverFrame();
+  // В файл пойдёт ровно этот кадр — с плёнкой, а не голая сцена
+  snapCover(t.seed, t.mood);
+}
+
+/* =====================================================
+   2c. ОБЛОЖКА · ЖИВОЙ КАДР
+   Поверх статики каждый кадр идёт плёнка: осадки дрейфуют,
+   зерно и пыль меняются, царапина держится пару секунд,
+   лампа softly дышит. Обложка перестаёт быть фотографией.
+   ===================================================== */
+function coverFrame() {
+  if (!coverBase || !coverAnim) return;
+  const S = 512;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const g = coverCv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  g.drawImage(coverBase, 0, 0, S, S);
+
+  const A = coverAnim;
+  const t = coverTick / 60;
+  // Кадр детерминирован парой (зерно, номер кадра) — плёнка «шумит», но повторяемо
+  const fr = mulberry32((A.seed ^ Math.imul(coverTick + 1, 2654435761)) >>> 0);
+
+  // 1. осадки: дождь течёт вниз, снег плывёт медленнее и качается
+  if (A.weather === 'rain') {
+    g.lineCap = 'butt';
+    for (const d of A.drops) {
+      const y = ((d.y + t * d.v) % 1.18) * S;
+      const x = d.x * S + Math.sin(t * 0.6 + d.p) * S * 0.004;
+      g.strokeStyle = 'rgba(238,228,216,' + d.a + ')';
+      g.lineWidth = d.w;
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x - S * 0.006, y + S * d.len); g.stroke();
+    }
+  } else if (A.weather === 'snow') {
+    for (const d of A.drops) {
+      const y = ((d.y + t * d.v) % 1.18) * S;
+      const x = d.x * S + Math.sin(t * 0.5 + d.p) * S * 0.02;
+      g.fillStyle = 'rgba(242,238,230,' + d.a + ')';
+      g.beginPath(); g.arc(x, y, d.w, 0, 6.3); g.fill();
+    }
+  }
+
+  // 2. лампа дышит: очень мягкое тёплое колебание
+  const pulse = 0.045 + 0.030 * Math.sin(t * 0.55) + 0.014 * Math.sin(t * 1.7 + 1.1);
+  g.save();
+  g.globalCompositeOperation = 'soft-light';
+  g.fillStyle = hexA(A.pal.warm, Math.max(0.01, pulse));
+  g.fillRect(0, 0, S, S);
+  g.restore();
+
+  // 3. зерно плёнки — живое, сдвигается каждый кадр
+  g.save();
+  g.globalCompositeOperation = 'overlay';
+  g.globalAlpha = 0.15;
+  const tile = grain();
+  const ox = -Math.floor(fr() * 128), oy = -Math.floor(fr() * 128);
+  for (let y = oy; y < S; y += 128) for (let x = ox; x < S; x += 128) g.drawImage(tile, x, y);
+  g.restore();
+
+  // 4. пыль и мелкие дропауты
+  for (let i = 0; i < 14; i++) {
+    g.fillStyle = 'rgba(240,232,214,' + (0.04 + 0.20 * fr()) + ')';
+    const s = S * (0.0012 + 0.0030 * fr());
+    g.fillRect(fr() * S, fr() * S, s, s);
+  }
+
+  // 5. царапина: живёт ~2.3 с и сменяется
+  if (coverTick % 140 === 0) {
+    A.scratch = { x: fr(), dx: (fr() - 0.5) * 0.02, a: 0.03 + 0.05 * fr() };
+  }
+  const sx = A.scratch.x * S;
+  g.strokeStyle = 'rgba(236,224,204,' + A.scratch.a + ')';
+  g.lineWidth = S * 0.0014;
+  g.beginPath(); g.moveTo(sx, 0); g.lineTo(sx + A.scratch.dx * S, S); g.stroke();
+
+  // 6. кромки кадра: лёгкий RGB-разъезд по краям, как на ленте
+  g.save();
+  g.globalCompositeOperation = 'screen';
+  g.fillStyle = 'rgba(198,84,72,0.055)';
+  g.fillRect(0, 0, S * 0.011, S);
+  g.fillStyle = 'rgba(84,152,198,0.055)';
+  g.fillRect(S * 0.989, 0, S * 0.011, S);
+  g.restore();
+}
+
+/* =====================================================
+   3. UI ПО СООБЩЕНИЯМ ВОРКЛЕТА
+   ===================================================== */
+let cur = null;      // текущий трек: имя, настроение, метаданные
+let coverT = null;   // то, что нарисовано на обложке (нужно для перерисовки при resize)
+const fmtTime = s => Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0');
+
+// Настроение словами: на обложке и в плеере — только атмосфера, без техданных
+const VIBE = {
+  dusty: 'dusty crates', jazzhop: 'smoky cafe', chillhop: 'sunlit balcony',
+  midnight: 'blue hour', ambient: 'still air', experimental: 'broken tape',
+  'lofi-house': 'wet asphalt', soul: 'slow warmth', bossa: 'sandy breeze',
+  piano: 'quiet room', dark: 'deep water', trap: 'cold neon',
+  dub: 'echo chamber', vapor: 'faded mall', chip: 'pixel dusk',
+  guitar: 'nylon & tape', strings: 'cathedral air', vocal: 'hushed voices',
+  musicbox: 'music box', bedroom: 'bedroom tape',
+};
+
+function applyTrack(msg) {
+  // если seed не пришёл (старый кэш процессора) — берём случайный, но не ломаем имя
+  const seed = (msg.seed >>> 0) || ((Math.random() * 4294967295) >>> 0);
+  const name = nameFor(seed, msg.mood);
+  cur = {
+    seed, trackNo: msg.trackNo, mood: msg.mood, kit: msg.kit,
+    key: msg.key, scale: msg.scale, bpm: msg.bpm, name, bars: msg.bars, dur: msg.dur,
+    voices: msg.voices,
+  };
+  coverT = cur;
+  drawCover(coverT);
+  trackEl.textContent = name;
+  artistEl.textContent = (VIBE[msg.mood] || 'lo-fi radio') + ' · non-stop';
+  const side = (msg.trackNo % 2) ? 'side b' : 'side a';
+  sideEl.textContent = side;
+  shellSideEl.textContent = side + ' · c-60';
+  shellCatEl.textContent = 'lf-' + String(msg.trackNo || 0).padStart(4, '0');
+  progress = 0;
+  saveBtn.disabled = false;
+  // Заготовку файла считаем не сразу: первые секунды трека не должны
+  // спорить за процессор со стартом воспроизведения. Но и не позже —
+  // каждая лишняя секунда это секунда ожидания по клику.
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(prefetch, 1500);
+  document.title = name + ' · lo-fi radio';
+}
+
+function handleWorkletMessage(e) {
+  const msg = e.data;
+  if (msg.type === 'status') {
+    if (!cur) {
+      applyTrack(msg);                       // первый трек — сразу, без анимации
+    } else if (msg.seed !== cur.seed && msg.seed !== pendingSeed) {
+      // Новый трек: уводим карточку и возвращаем уже с новой обложкой.
+      // Статусов приходит много, поэтому перерисовку ставим один раз на seed.
+      pendingSeed = msg.seed;
+      coverWrap.classList.add('switching');
+      trackEl.classList.add('switching');
+      artistEl.classList.add('switching');
+      const m = msg;
+      setTimeout(() => {
+        applyTrack(m);
+        coverWrap.classList.remove('switching');
+        trackEl.classList.remove('switching');
+        artistEl.classList.remove('switching');
+        pendingSeed = null;
+      }, 180);
+    }
+    if (msg.dur && msg.bars) {
+      const t = Math.min(msg.dur, Math.round((msg.bar - 1) * (msg.dur / msg.bars)));
+      timeEl.textContent = fmtTime(t) + ' / ' + fmtTime(msg.dur);
+      progress = msg.dur ? t / msg.dur : 0;
+    }
+  }
+}
+
+/* =====================================================
+   4. ВОЛНА (осциллограмма «как на ленте»)
+   ===================================================== */
+const wg = waveCv.getContext('2d');
+let waveData = new Uint8Array(1024);
+let waveW = 380, waveH = 54;
+
+function sizeCanvas() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  waveW = waveCv.clientWidth || 380;
+  waveH = waveCv.clientHeight || 54;
+  waveCv.width = Math.round(waveW * dpr);
+  waveCv.height = Math.round(waveH * dpr);
+  wg.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawWave() {
+  const w = waveW, h = waveH;
+  wg.clearRect(0, 0, w, h);
+  const mid = h / 2;
+
+  // осевая — почти невидимая
+  wg.strokeStyle = 'rgba(236,224,204,0.07)';
+  wg.lineWidth = 1;
+  wg.beginPath(); wg.moveTo(0, mid); wg.lineTo(w, mid); wg.stroke();
+
+  if (analyser && isPlaying) {
+    analyser.getByteTimeDomainData(waveData);
+    const n = waveData.length;
+    const amp = h * 0.36;
+
+    // прореживаем и сглаживаем квадратичными сегментами: мягкий силуэт ленты
+    const pts = [];
+    for (let i = 0; i < n; i += 2) {
+      pts.push([(i / (n - 1)) * w, mid + ((waveData[i] - 128) / 128) * amp]);
+    }
+
+    const trace = () => {
+      wg.beginPath();
+      wg.moveTo(pts[0][0], mid);
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[i + 1];
+        if (!q) { wg.lineTo(p[0], p[1]); break; }
+        wg.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+      }
+      wg.lineTo(w, mid);
+      wg.closePath();
+    };
+
+    // призрачный слой со сдвигом — «потёк» ленты
+    wg.save();
+    wg.globalAlpha = 0.28;
+    wg.translate(-1.4, 0.9);
+    trace();
+    wg.fillStyle = 'rgba(209,154,140,0.55)';
+    wg.fill();
+    wg.restore();
+
+    // основной силуэт
+    trace();
+    const gd = wg.createLinearGradient(0, 0, 0, h);
+    gd.addColorStop(0,   'rgba(233,169,92,0.40)');
+    gd.addColorStop(0.5, 'rgba(233,169,92,0.15)');
+    gd.addColorStop(1,   'rgba(209,154,140,0.05)');
+    wg.fillStyle = gd;
+    wg.fill();
+
+    // тонкая светлая кромка по верхней границе сигнала
+    wg.save();
+    trace();
+    wg.clip();
+    wg.beginPath();
+    wg.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) wg.lineTo(pts[i][0], pts[i][1]);
+    wg.strokeStyle = 'rgba(245,214,160,0.50)';
+    wg.lineWidth = 1.1;
+    wg.lineJoin = 'round';
+    wg.stroke();
+    wg.restore();
+  }
+
+  // плейхед: пройденная часть уходит в тень, как прочитанная лента
+  const px = Math.max(0, Math.min(1, progress)) * w;
+  wg.fillStyle = 'rgba(8,6,14,0.50)';
+  wg.fillRect(px, 0, w - px, h);
+  wg.strokeStyle = 'rgba(240,232,214,0.7)';
+  wg.lineWidth = 1;
+  wg.beginPath(); wg.moveTo(px, 1); wg.lineTo(px, h - 1); wg.stroke();
+}
+
+function loop() {
+  drawWave();
+  coverTick++;
+  // Обложка живёт всегда, но на паузе ей хватает 12 к/с: кадр 512×512
+  // с осадками и зерном — самая дорогая часть страницы, а на паузе
+  // дышащая лампа и дрейф плёнки читаются и на низкой частоте.
+  const every = isPlaying ? 2 : 5;
+  if (coverTick % every === 0) coverFrame();
+  requestAnimationFrame(loop);
+}
+
+/* =====================================================
+   5. АУДИОТРАКТ
+   ===================================================== */
+async function start() {
+  try {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      await ctx.audioWorklet.addModule('lofi-processor.js');
+      await ctx.audioWorklet.addModule('plugins/mastering.js');
+
+      workletNode = new AudioWorkletNode(ctx, 'lofi-processor', {
+        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
+      });
+      workletNode.port.onmessage = handleWorkletMessage;
+
+      masteringNode = new AudioWorkletNode(ctx, 'mastering-processor', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+      });
+      masteringNode.port.onmessage = handleWorkletMessage;
+
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.72;
+      waveData = new Uint8Array(analyser.fftSize);
+
+      masterGain = ctx.createGain();
+      masterGain.gain.value = (parseFloat(localStorage.getItem(VOL_KEY)) || 80) / 100;
+
+      workletNode.connect(analyser);
+      analyser.connect(masteringNode);
+      masteringNode.connect(masterGain);
+      masterGain.connect(ctx.destination);
+
+      sizeCanvas();
+    }
+
+    await ctx.resume();
+    // Первый запуск: если пришли по ссылке — играем её зерно, иначе движок
+    // берёт свежее случайное. Дальше каждое «next» тоже случайное.
+    // Слой станции передаём всегда — это не зерно, он живёт до смены страницы.
+    const startMsg = { type: 'start' };
+    if (!sentInitialSeed && linkSeed !== null) startMsg.seed = linkSeed;
+    if (forcedMood) startMsg.mood = forcedMood;
+    sentInitialSeed = true;
+    workletNode.port.postMessage(startMsg);
+
+    isPlaying = true;
+    radioEl.classList.add('playing');
+    playBtn.classList.add('playing');
+    playLabel.textContent = 'pause';
+    playIcon.innerHTML = '<path d="M8 5h3.2v14H8zM12.8 5H16v14h-3.2z"/>';
+    liveDot.style.display = 'inline-block';
+    errorEl.style.display = 'none';
+  } catch (err) {
+    errorEl.style.display = 'block';
+    errorEl.textContent = 'Ошибка: ' + err.message + '. Нужен HTTPS или localhost.';
+    console.error(err);
+  }
+}
+
+function stop() {
+  if (workletNode) workletNode.port.postMessage({ type: 'stop' });
+  isPlaying = false;
+  radioEl.classList.remove('playing');
+  playBtn.classList.remove('playing');
+  playLabel.textContent = 'play';
+  playIcon.innerHTML = '<path d="M8 5.5v13l11-6.5z"/>';
+  liveDot.style.display = 'none';
+  progress = 0;
+}
+
+playBtn.addEventListener('click', () => (isPlaying ? stop() : start()));
+
+nextBtn.addEventListener('click', () => {
+  if (!workletNode) { start(); return; }
+  coverWrap.classList.add('switching');
+  trackEl.classList.add('switching');
+  artistEl.classList.add('switching');
+  workletNode.port.postMessage({ type: 'next' });
+  if (!isPlaying) start();
+});
+
+// Громкость: мягко, сохраняем между сессиями
+volEl.addEventListener('input', () => {
+  const v = parseInt(volEl.value, 10) / 100;
+  if (masterGain) masterGain.gain.value = v;
+  localStorage.setItem(VOL_KEY, volEl.value);
+});
+
+// Ссылка на трек. Сохраняем не звук, а зерно: по нему трек собирается заново.
+// На мобильных отдаём системное «поделиться», иначе копируем в буфер.
+shareBtn.addEventListener('click', async () => {
+  // Ссылка именно на играющий трек: в адресной строке зерна нет (иначе
+  // перезагрузка возвращала бы тот же трек), поэтому собираем её сами.
+  const url = cur ? trackLink(cur.seed) : location.href;
+  const title = cur ? cur.name + ' · lo-fi radio' : 'lo-fi radio';
+  const flash = (text) => {
+    shareBtn.classList.add('done');
+    shareLabel.textContent = text;
+    setTimeout(() => { shareBtn.classList.remove('done'); shareLabel.textContent = 'link'; }, 1600);
+  };
+  if (navigator.share) {
+    try { await navigator.share({ title, url }); flash('sent'); return; }
+    catch (e) {
+      // Отменили сами — молчим. А если браузер запретил (в рамке станции
+      // системное «поделиться» бывает закрыто) — идём копировать в буфер.
+      if (e && e.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    flash('copied');
+  } catch (e) {
+    // Старые сборки без Clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    flash(ok ? 'copied' : 'no');
+  }
+});
+
+/* =====================================================
+   6. ЭКСПОРТ ТРЕКА
+   Трека нет ни на сервере, ни в файле: он собирается из зерна.
+   Движок рендерит те же две минуты офлайн на той же частоте, что
+   и эфир, через ту же цепочку мастеринга — поэтому файл совпадает
+   с тем, что слышно, а не является «упрощённой версией». LAME
+   в WASM пакует в MP3, ID3 несёт обложку, название и ссылку.
+   Заготовка считается сразу, как трек начался: к нажатию «save»
+   файл обычно уже готов и падает мгновенно.
+   ===================================================== */
+const MP3_RATES = [48000, 44100, 32000, 24000, 22050];
+const MP3_CHUNK = 1152 * 16;  // кратно кадру MPEG-1
+const VENDOR_JS = 'vendor/WasmMediaEncoder.min.js';
+const VENDOR_WASM = 'vendor/mp3.wasm';
+let saveBusy = false;
+let wasmBuf = null;
+let readyFor = null;          // зерно, для которого MP3 уже собран
+let readyBlob = null;
+let renderJob = null;         // заготовка, которая считается прямо сейчас
+let jobProgress = 0;          // её ход 0…1 — чтобы клик по «save» не выглядел зависанием
+let prefetchTimer = 0;
+let wantSeed = null;          // зерно, для которого нужна заготовка
+let prefetchFailed = null;    // для него уже не получилось — не зацикливаемся
+
+// Частота рендера = частота эфира. Иначе фильтры считались бы по другим
+// коэффициентам, и файл перестал бы быть копией услышанного.
+function saveRate() {
+  const r = Math.round((ctx && ctx.sampleRate) || 48000);
+  if (MP3_RATES.indexOf(r) >= 0) return r;
+  return r > 24000 ? (r > 32000 ? 48000 : 32000) : 24000;
+}
+
+function loadScriptOnce(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = res;
+    s.onerror = () => rej(new Error('не загрузился ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+// Тянем скрипт энкодера и wasm заранее — к первому сохранению они уже в памяти
+async function readyEncoder() {
+  if (!self.WasmMediaEncoder) await loadScriptOnce(VENDOR_JS);
+  if (!wasmBuf) wasmBuf = await (await fetch(VENDOR_WASM)).arrayBuffer();
+}
+
+async function makeEncoder() {
+  await readyEncoder();
+  // Именно createEncoder: у готового createMp3Encoder URL уже занят первым
+  // аргументом, и он уходит тянуть wasm из сети. ArrayBuffer надёжнее —
+  // не зависим ни от сети, ни от того, отдаёт ли сервер application/wasm.
+  return self.WasmMediaEncoder.createEncoder('audio/mpeg', wasmBuf);
+}
+
+/* --- ID3v2.3: строки в UTF-16 с BOM, обложка — кадр APIC --- */
+function id3Frame(id, body) {
+  const out = new Uint8Array(10 + body.length);
+  for (let i = 0; i < 4; i++) out[i] = id.charCodeAt(i);
+  out[4] = (body.length >>> 24) & 255; out[5] = (body.length >>> 16) & 255;
+  out[6] = (body.length >>> 8) & 255; out[7] = body.length & 255;
+  out.set(body, 10);
+  return out;
+}
+function id3Utf16(str) {
+  const b = new Uint8Array(2 + str.length * 2);
+  b[0] = 0xFF; b[1] = 0xFE;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    b[2 + i * 2] = c & 255; b[3 + i * 2] = c >> 8;
+  }
+  return b;
+}
+function id3Text(id, str) {
+  const t = id3Utf16(str);
+  const body = new Uint8Array(1 + t.length);
+  body[0] = 0x01;
+  body.set(t, 1);
+  return id3Frame(id, body);
+}
+function id3Comment(str) {
+  const t = id3Utf16(str);
+  const body = new Uint8Array(1 + 3 + 4 + t.length);
+  body[0] = 0x01;
+  body[1] = 0x65; body[2] = 0x6E; body[3] = 0x67;            // 'eng'
+  body.set([0xFF, 0xFE, 0x00, 0x00], 4);                     // пустое описание
+  body.set(t, 8);
+  return id3Frame('COMM', body);
+}
+function id3Apic(mime, img) {
+  const m = new TextEncoder().encode(mime);
+  // Кодировка 0x00 (latin-1) и пустое описание одним нулём: так этот кадр
+  // читают все плееры. UTF-16 здесь ломает разбор у части из них, а текст
+  // в описании нам не нужен — MIME и так латиница.
+  const body = new Uint8Array(1 + m.length + 1 + 1 + 1 + img.length);
+  let p = 0;
+  body[p++] = 0x00;
+  body.set(m, p); p += m.length;
+  body[p++] = 0x00;                                          // конец MIME
+  body[p++] = 0x03;                                          // тип: обложка альбома
+  body[p++] = 0x00;                                          // пустое описание
+  body.set(img, p);
+  return id3Frame('APIC', body);
+}
+function id3Header(size) {
+  const h = new Uint8Array(10);
+  h[0] = 0x49; h[1] = 0x44; h[2] = 0x33;                     // "ID3"
+  h[3] = 3; h[4] = 0;                                        // версия 2.3.0
+  h[6] = (size >>> 21) & 0x7F; h[7] = (size >>> 14) & 0x7F;
+  h[8] = (size >>> 7) & 0x7F; h[9] = size & 0x7F;            // synchsafe
+  return h;
+}
+
+// Офлайн-рендер трека по зерну: тот же движок, та же цепочка мастеринга
+// и та же частота, что в эфире, — поэтому результат совпадает со слышимым.
+async function renderOffline(seed, dur, sr, onProgress) {
+  // Запас после конца: музыкальный конец может уехать за dur (округление),
+  // плюс мастер тянет хвост. Лишнюю тишину срежем по последнему ненулевому
+  // сэмплу (см. encodeMp3), поэтому запас ничего не стоит.
+  const frames = Math.ceil((dur + 1.2) * sr);
+  const off = new OfflineAudioContext(2, frames, sr);
+  await off.audioWorklet.addModule('lofi-processor.js');
+  await off.audioWorklet.addModule('plugins/mastering.js');
+
+  const gen = new AudioWorkletNode(off, 'lofi-processor', {
+    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2],
+    // Зерно и старт задаём конструктором: в офлайне сообщение через порт
+    // приходит уже после рендера, и трек получается тихим.
+    // oneShot — трек доиграл и замолк, без ухода в следующий.
+    processorOptions: { seed, autoStart: true, oneShot: true },
+  });
+  const mast = new AudioWorkletNode(off, 'mastering-processor', {
+    numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+  });
+  gen.connect(mast);
+  mast.connect(off.destination);
+
+  const watch = setInterval(() => {
+    const p = off.currentTime / dur;
+    if (p > 0 && p < 1 && onProgress) onProgress(p);
+  }, 150);
+  try {
+    return await off.startRendering();
+  } finally {
+    clearInterval(watch);
+  }
+}
+
+// MP3 целиком, готовый к упаковке. Рендер — это первые 60% хода,
+// кодирование — оставшиеся 40%: полоска не зависает на одном месте.
+async function renderMp3(seed, dur, onProgress) {
+  const bump = (p) => { if (onProgress) onProgress(p); };
+  const t0 = performance.now();
+  const buffer = await renderOffline(seed, dur, saveRate(), (p) => bump(p * 0.6));
+  const t1 = performance.now();
+  const parts = await encodeMp3(buffer, (p) => bump(0.6 + p * 0.4));
+  const t2 = performance.now();
+  // Сколько файл занимает на самом деле. Без этой цифры ускорять нечего:
+  // рендер и кодирование тянут разное время на разных машинах.
+  console.info('файл ' + hex32(seed) + ': рендер ' + ((t1 - t0) / 1000).toFixed(1) +
+    ' с, кодирование ' + ((t2 - t1) / 1000).toFixed(1) + ' с');
+  return new Blob(parts, { type: 'audio/mpeg' });
+}
+
+// Заготовка: трек начался — считаем файл в фоне, чтобы «save» сработал
+// мгновенно. Ошибку глотаем молча: по клику всё посчитается заново,
+// и повторять неудачную заготовку для того же зерна больше не пытаемся.
+function prefetch() {
+  if (cur) { wantSeed = cur.seed; pump(); }
+}
+
+function pump() {
+  if (renderJob || !cur || readyFor === wantSeed || prefetchFailed === wantSeed) return;
+  const seed = wantSeed, dur = cur.dur;
+  const job = { seed };
+  renderJob = job;
+  jobProgress = 0;
+  job.done = renderMp3(seed, dur, (p) => { jobProgress = p; }).then(
+    (blob) => { readyFor = seed; readyBlob = blob; },
+    () => { prefetchFailed = seed; },
+  ).then(() => {
+    if (renderJob === job) renderJob = null;
+    pump();               // трек мог смениться, пока считалась заготовка
+  });
+}
+
+async function encodeMp3(buffer, onProgress) {
+  const enc = await makeEncoder();
+  enc.configure({ sampleRate: buffer.sampleRate, channels: 2, vbrQuality: 2 });
+  let L = buffer.getChannelData(0), R = buffer.getChannelData(1);
+  // Хвост: после того как трек погас, движок выдаёт точные нули. Отрезаем их,
+  // чтобы файл кончался там же, где кончается музыка, а не тянул тишину.
+  let end = L.length;
+  while (end > 0 && L[end - 1] === 0 && R[end - 1] === 0) end--;
+  L = L.subarray(0, end); R = R.subarray(0, end);
+  const parts = [];
+  const total = L.length;
+  for (let i = 0; i < total; i += MP3_CHUNK) {
+    // Буфер кадра принадлежит энкодеру — копируем сразу
+    parts.push(enc.encode([L.subarray(i, i + MP3_CHUNK), R.subarray(i, i + MP3_CHUNK)]).slice());
+    // Каждые ~10 секунд уступаем поток браузеру: кодирование двух минут
+    // иначе замораживает страницу на несколько секунд — трек «дёргается»,
+    // полоска хода стоит, кнопки не отвечают.
+    if (i % (MP3_CHUNK * 24) === 0) {
+      if (onProgress) onProgress(i / total);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  parts.push(enc.finalize().slice());
+  if (onProgress) onProgress(1);
+  return parts;
+}
+
+// JPEG-байты канваса. Обложку ужимаем до её родных 512: кадр 1024×1024
+// с зерном весит в теге около мегабайта, а в плеере виден размером с ноготь.
+// Ждём не бесконечно: если браузер не отзовётся, файл всё равно скачается.
+const COVER_PX = 512;
+let coverOut = null;
+function jpegBytes(canvas) {
+  if (!coverOut) coverOut = document.createElement('canvas');
+  coverOut.width = coverOut.height = COVER_PX;
+  const g = coverOut.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(canvas, 0, 0, COVER_PX, COVER_PX);
+  return new Promise((res) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; res(v || new Uint8Array(0)); } };
+    setTimeout(() => finish(null), 2500);
+    try {
+      coverOut.toBlob(async (b) => {
+        if (!b) return finish(null);
+        try { finish(new Uint8Array(await b.arrayBuffer())); } catch (e) { finish(null); }
+      }, 'image/jpeg', 0.92);
+    } catch (e) { finish(null); }
+  });
+}
+
+// Снимок делаем на смене трека, пока кадр только что собран: на экране и в
+// файле тогда одна и та же картинка — со всей плёнкой, а не голая сцена.
+// Тот же трек (перерисовка при resize) второй раз не снимаем: это дорого.
+function snapCover(seed, mood) {
+  if (coverShot && coverShot.seed === seed && coverShot.mood === mood) return;
+  coverShot = { seed, mood, ready: jpegBytes(coverCv) };
+}
+
+async function coverJpeg(track) {
+  // Своё зерно — свой кадр: чужую обложку в файл не подкладываем
+  if (coverShot && coverShot.seed === track.seed && coverShot.mood === track.mood) {
+    const b = await coverShot.ready;
+    if (b.length) return b;
+  }
+  // Снимок не удался — кладём сцену, но только если она от того же трека:
+  // чужая картинка хуже, чем никакой.
+  const same = coverT && coverT.seed === track.seed && coverT.mood === track.mood;
+  return (coverBase && same) ? await jpegBytes(coverBase) : new Uint8Array(0);
+}
+
+function saveLabel_(text) { saveLabel.textContent = text; }
+
+// Мгновенный старт: заготовка обычно уже посчитана (см. prefetch), а если
+// она как раз считается — дожидаемся её, а не запускаем второй рендер.
+async function currentMp3(track) {
+  if (readyFor === track.seed) return readyBlob;
+  // Ждём уже идущую заготовку — свою или чужую: второй тяжёлый рендер
+  // параллельно только замедлил бы оба.
+  if (renderJob) {
+    await renderJob.done;
+    if (readyFor === track.seed) return readyBlob;
+  }
+  return null;
+}
+
+saveBtn.addEventListener('click', async () => {
+  if (saveBusy || !cur) return;
+  const track = cur;
+  saveBusy = true;
+  saveBtn.classList.add('busy');
+  saveBtn.style.setProperty('--p', 0);
+  saveLabel_('saving');
+  // Пока ждём недосчитанную заготовку — показываем её ход. Молчащая полоска
+  // выглядит как зависание, хотя работа идёт.
+  const mirror = renderJob
+    ? setInterval(() => saveBtn.style.setProperty('--p', jobProgress.toFixed(3)), 200)
+    : 0;
+  try {
+    let mp3 = await currentMp3(track);
+    if (!mp3) {                       // не успела — считаем сейчас, с полоской хода
+      mp3 = await renderMp3(track.seed, track.dur, (p) => saveBtn.style.setProperty('--p', p.toFixed(3)));
+      readyFor = track.seed;
+      readyBlob = mp3;
+    }
+    clearInterval(mirror);
+    saveBtn.style.setProperty('--p', 0.96);
+
+    const side = (track.trackNo % 2) ? 'side b' : 'side a';
+    const link = trackLink(track.seed);
+    const frames = [
+      id3Text('TIT2', track.name),
+      id3Text('TPE1', 'lo-fi radio'),
+      id3Text('TALB', side + ' · lf-' + String(track.trackNo || 0).padStart(4, '0')),
+      id3Text('TCON', 'Lo-Fi'),
+      id3Text('TRCK', String(track.trackNo || 1)),
+      id3Comment('эфир: ' + link),
+    ];
+    const img = await coverJpeg(track);
+    if (img.length) frames.push(id3Apic('image/jpeg', img));
+    else console.warn('обложка не снялась — файл уйдёт без картинки');
+
+    const head = id3Header(frames.reduce((a, f) => a + f.length, 0));
+    const blob = new Blob([head, ...frames, mp3], { type: 'audio/mpeg' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = track.name.replace(/[\\/:*?"<>|]+/g, '-').trim() + ' - lo-fi radio.mp3';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    saveLabel_('saved');
+  } catch (err) {
+    console.error(err);
+    saveLabel_('error');
+  } finally {
+    saveBusy = false;
+    saveBtn.classList.remove('busy');
+    saveBtn.style.setProperty('--p', 0);
+    setTimeout(() => { if (!saveBusy) saveLabel_('save'); }, 1800);
+  }
+});
+
+// Вкладку свернули — worklet продолжает играть, волну просто не рисуем
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) sizeCanvas();
+});
+window.addEventListener('resize', () => {
+  sizeCanvas();
+  if (coverT) drawCover(coverT);
+});
+
+// Заставка до первого запуска: тихая ночная обложка вместо пустого квадрата
+coverT = { seed: 20240914, trackNo: 0, mood: 'midnight', kit: '—',
+           key: 'A', scale: 'aeolian', bpm: 72, name: 'standby' };
+drawCover(coverT);
+
+// Канва волны размечена, кадр обложки живёт постоянно — даже на паузе
+sizeCanvas();
+loop();
+
+// Офлайн-режим: движок и шрифты кладутся в кэш браузера, дальше радио
+// работает без сети и ставится на домашний экран как приложение.
+if ('serviceWorker' in navigator) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* не критично */ });
+  });
+}
+
+// Энкодер (133 КБ wasm) тянем в простое: к первому «save» он уже в памяти,
+// и файл считается без ожидания сети.
+window.addEventListener('load', () => {
+  const warm = () => readyEncoder().catch(() => { /* посчитаем по клику */ });
+  if (self.requestIdleCallback) self.requestIdleCallback(warm, { timeout: 5000 });
+  else setTimeout(warm, 2500);
+});
+</script>
+</body>
+</html>

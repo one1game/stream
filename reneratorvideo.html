@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lo-Fi Landscape</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #1a1512; min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 16px; overflow-x: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #d4c4a8;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .stage {
+    position: relative; border-radius: 16px; overflow: hidden;
+    box-shadow: 0 30px 100px rgba(0,0,0,0.9), 0 0 0 1px rgba(255,220,180,0.06);
+    max-width: 100%;
+  }
+  canvas { display: block; width: 100%; height: auto; background: #2a201a; }
+  .panel {
+    margin-top: 14px; display: flex; flex-direction: column;
+    gap: 10px; align-items: center; max-width: 1100px;
+    width: 100%;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  button {
+    padding: 9px 16px; font-size: 13.5px;
+    border: none; border-radius: 8px;
+    background: #8b6f47; color: #f4ead5;
+    cursor: pointer; font-family: inherit;
+    transition: background 0.15s, transform 0.1s;
+    font-weight: 500; white-space: nowrap;
+    min-height: 38px;
+  }
+  button:hover { background: #a08256; }
+  button:active { transform: scale(0.97); }
+  button.alt { background: #4a3d30; }
+  button.alt:hover { background: #5c4c3c; }
+  button.toggle-off { opacity: 0.5; }
+  button.cinema { background: #7a4a2a; }
+  button.cinema:hover { background: #8c5838; }
+  .info {
+    margin-top: 10px; font-size: 12px;
+    color: #7a6a55; text-align: center;
+    line-height: 1.6; max-width: 900px;
+    padding: 0 10px;
+  }
+  #hud {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(30, 22, 16, 0.7);
+    color: #d4a574;
+    font-family: "SF Mono", "Consolas", monospace;
+    font-size: 11px;
+    padding: 8px 12px; border-radius: 8px;
+    line-height: 1.5;
+    border: 1px solid rgba(212,165,116,0.15);
+    pointer-events: none; white-space: pre;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  #hud .low { color: #c96a4a; }
+  #hud .mid { color: #d4a574; }
+  #hud .ok { color: #a8c090; }
+  @media (max-width: 700px) {
+    button { font-size: 12px; padding: 8px 12px; }
+    #hud { font-size: 10px; padding: 6px 9px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <canvas id="c" width="960" height="600"></canvas>
+  <div id="hud">FPS: --</div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <button onclick="newScene()">🎲 Новый</button>
+    <button class="alt" onclick="newScene('mountains')">🏔 Горы</button>
+    <button class="alt" onclick="newScene('lake')">🌊 Озеро</button>
+    <button class="alt" onclick="newScene('valley')">🌾 Долина</button>
+    <button class="alt" onclick="newScene('coast')">🏖 Берег</button>
+  </div>
+  <div class="row">
+    <button class="alt" id="btnPause" onclick="togglePause()">⏸ Пауза</button>
+    <button class="alt" id="btnCycle" onclick="toggleCycle()">🌗 Цикл</button>
+    <button class="alt" id="btnWind" onclick="toggleWind()">💨 Ветер</button>
+    <button class="cinema" id="btnLofi" onclick="toggleLofi()">📻 Lo-Fi</button>
+    <button class="alt" id="btnGrain" onclick="toggleGrain()">🎞 Зерно</button>
+  </div>
+</div>
+
+<div class="info">
+  <b>Lo-Fi mode:</b> тёплые пастельные тона · мягкие размытия · сильное зерно плёнки · глубокая виньетка · приглушённый контраст
+</div>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const W = canvas.width, H = canvas.height;
+const rnd = (a, b) => Math.random() * (b - a) + a;
+const rint = (a, b) => Math.floor(rnd(a, b + 1));
+const lerp = (a, b, t) => a + t * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const mixc = (a, b, t) => [
+  Math.round(lerp(a[0], b[0], t)),
+  Math.round(lerp(a[1], b[1], t)),
+  Math.round(lerp(a[2], b[2], t)),
+];
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+// ============================================================
+//  ФИЗИКА
+// ============================================================
+const PHYS = { g: 9.81, windBase: 1.5, windGust: 1.0, gravityWaves: 9.81 };
+let windValue = 1.5, windTarget = 1.5, windDirValue = 1;
+
+function updateWind(dt) {
+  if (Math.random() < dt * 0.2) {
+    windTarget = PHYS.windBase + rnd(-PHYS.windGust, PHYS.windGust) * 1.2;
+    if (Math.random() < 0.2) windDirValue *= -1;
+  }
+  windValue = lerp(windValue, windTarget, dt * 0.5);
+}
+function windSpeed() { return windValue; }
+function windDir() { return windDirValue; }
+
+// ============================================================
+//  ШУМ ПЕРЛИНА
+// ============================================================
+const perm = new Uint8Array(512);
+(function() {
+  const p = [];
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = p[i]; p[i] = p[j]; p[j] = t;
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+})();
+const fade = t => t * t * (3 - 2 * t);
+function noise(x, y) {
+  const X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+  x -= Math.floor(x); y -= Math.floor(y);
+  const u = fade(x), v = fade(y);
+  const A = perm[X] + Y, B = perm[X + 1] + Y;
+  const g = (h, x, y) => {
+    const k = h & 3;
+    const uu = k < 2 ? x : y;
+    const vv = k < 2 ? y : x;
+    return ((k & 1) ? -uu : uu) + ((k & 2) ? -2 * vv : 2 * vv);
+  };
+  return lerp(
+    lerp(g(perm[A], x, y), g(perm[B], x - 1, y), u),
+    lerp(g(perm[A + 1], x, y - 1), g(perm[B + 1], x - 1, y - 1), u),
+    v
+  ) * 0.5;
+}
+function fbm(x, y, oct = 4) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < oct; i++) { s += amp * noise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+// ============================================================
+//  LO-FI ПАЛИТРЫ
+//  Тёплые, приглушённые, пастельные, без чистых цветов
+// ============================================================
+const PAL = [
+  { t: 0.00, name: 'ночь',
+    sky:[[28,26,42],[42,38,58],[68,60,80]],
+    sun:[220,200,190], sunGlow:[180,150,140], sunSize:18, stars:0.7,
+    water:[[45,42,60],[22,20,35]],
+    mtn:[[62,58,78],[48,44,64],[35,32,48]],
+    forest:[22,22,30], grass:[35,38,32], rock:[50,46,55],
+    sand:[65,58,50], fog:[80,72,88], fogAmt:0.6, rain:0 },
+  { t: 0.22, name: 'рассвет',
+    sky:[[98,88,118],[198,158,142],[232,190,158]],
+    sun:[248,220,180], sunGlow:[240,180,140], sunSize:36, stars:0.15,
+    water:[[118,100,110],[62,52,68]],
+    mtn:[[148,128,138],[118,98,118],[82,68,90]],
+    forest:[52,48,48], grass:[72,72,62], rock:[88,78,80],
+    sand:[180,158,138], fog:[200,170,155], fogAmt:0.55, rain:0 },
+  { t: 0.4, name: 'день',
+    sky:[[110,142,178],[162,182,206],[212,212,210]],
+    sun:[250,240,210], sunGlow:[245,225,180], sunSize:26, stars:0,
+    water:[[95,118,142],[48,60,80]],
+    mtn:[[135,142,158],[105,110,128],[78,84,102]],
+    forest:[48,62,50], grass:[78,92,72], rock:[88,88,92],
+    sand:[200,182,152], fog:[190,192,200], fogAmt:0.4, rain:0.15 },
+  { t: 0.65, name: 'закат',
+    sky:[[88,80,112],[208,140,118],[238,190,148]],
+    sun:[248,220,180], sunGlow:[240,170,120], sunSize:40, stars:0,
+    water:[[128,98,108],[58,42,60]],
+    mtn:[[148,122,138],[112,88,110],[76,60,82]],
+    forest:[45,40,46], grass:[72,58,54], rock:[80,68,72],
+    sand:[180,158,132], fog:[225,175,145], fogAmt:0.55, rain:0 },
+  { t: 0.82, name: 'сумерки',
+    sky:[[52,48,80],[108,82,116],[178,124,120]],
+    sun:[238,190,160], sunGlow:[210,140,110], sunSize:32, stars:0.35,
+    water:[[78,62,82],[38,30,48]],
+    mtn:[[92,78,102],[70,60,84],[48,42,64]],
+    forest:[32,30,40], grass:[50,46,48], rock:[58,52,60],
+    sand:[118,100,90], fog:[160,124,120], fogAmt:0.6, rain:0 },
+  { t: 1.00, name: 'ночь',
+    sky:[[28,26,42],[42,38,58],[68,60,80]],
+    sun:[220,200,190], sunGlow:[180,150,140], sunSize:18, stars:0.7,
+    water:[[45,42,60],[22,20,35]],
+    mtn:[[62,58,78],[48,44,64],[35,32,48]],
+    forest:[22,22,30], grass:[35,38,32], rock:[50,46,55],
+    sand:[65,58,50], fog:[80,72,88], fogAmt:0.6, rain:0 },
+];
+
+function palette(t) {
+  t = ((t % 1) + 1) % 1;
+  let a = PAL[0], b = PAL[0];
+  for (let i = 0; i < PAL.length - 1; i++) {
+    if (t >= PAL[i].t && t <= PAL[i + 1].t) { a = PAL[i]; b = PAL[i + 1]; break; }
+  }
+  const span = (b.t - a.t) || 1;
+  let k = (t - a.t) / span;
+  k = k * k * (3 - 2 * k);
+  return {
+    name: k < 0.5 ? a.name : b.name,
+    skyTop: mixc(a.sky[0], b.sky[0], k), skyMid: mixc(a.sky[1], b.sky[1], k), skyBot: mixc(a.sky[2], b.sky[2], k),
+    sunColor: mixc(a.sun, b.sun, k), sunGlow: mixc(a.sunGlow, b.sunGlow, k), sunSize: lerp(a.sunSize, b.sunSize, k),
+    stars: lerp(a.stars, b.stars, k),
+    waterTop: mixc(a.water[0], b.water[0], k), waterBot: mixc(a.water[1], b.water[1], k),
+    mtnFar: mixc(a.mtn[0], b.mtn[0], k), mtnMid: mixc(a.mtn[1], b.mtn[1], k), mtnNear: mixc(a.mtn[2], b.mtn[2], k),
+    forest: mixc(a.forest, b.forest, k), grass: mixc(a.grass, b.grass, k), rock: mixc(a.rock, b.rock, k),
+    sand: mixc(a.sand, b.sand, k), fog: mixc(a.fog, b.fog, k), fogAmt: lerp(a.fogAmt, b.fogAmt, k), rain: lerp(a.rain, b.rain, k),
+  };
+}
+
+// ============================================================
+//  СОСТОЯНИЕ
+// ============================================================
+let S = null, time = 0, phase = 0.35;
+let cycleOn = true, paused = false, windOn = true;
+let lofiOn = true, grainOn = true;
+const CYCLE_LEN = 60;
+
+let P_lastSunGlow = [240, 200, 180];
+
+const staticCache = document.createElement('canvas');
+staticCache.width = W; staticCache.height = H;
+const staticCtx = staticCache.getContext('2d');
+let staticDirty = true;
+
+const reflectCache = document.createElement('canvas');
+reflectCache.width = W; reflectCache.height = H;
+const reflectCtx = reflectCache.getContext('2d');
+let reflectFrame = 0;
+
+// ============================================================
+//  ВОЛНЫ
+// ============================================================
+let waveComponents = [];
+function initWaves() {
+  waveComponents = [];
+  const wavelengths = [40, 90, 160, 280];
+  for (let i = 0; i < wavelengths.length; i++) {
+    const L = wavelengths[i];
+    const k = 2 * Math.PI / L;
+    const omega = Math.sqrt(PHYS.gravityWaves * k);
+    const A = 6 / (1 + i * 0.8);
+    waveComponents.push({ k, omega, A, phi: rnd(0, Math.PI * 2) });
+  }
+}
+function waterHeight(x, t) {
+  let h = 0;
+  for (const w of waveComponents) h += w.A * Math.sin(w.k * x - w.omega * t + w.phi);
+  return h;
+}
+
+// ============================================================
+//  ГЕНЕРАЦИЯ СЦЕНЫ
+// ============================================================
+function newScene(forceType) {
+  if (S) {
+    S.ridges.length = 0; S.trees.length = 0; S.grass.length = 0;
+    S.rocks.length = 0; S.clouds.length = 0; S.stars.length = 0;
+    S.birds.length = 0; S.rain.length = 0; S.ripples.length = 0; S.hills.length = 0;
+  }
+  const types = ['mountains', 'lake', 'valley', 'coast'];
+  const type = forceType || types[rint(0, 3)];
+  const horizon = H * (type === 'coast' ? 0.55 : type === 'valley' ? 0.5 : 0.55);
+  const waterY = type === 'lake' ? horizon + 20 : type === 'coast' ? horizon + 5 : null;
+
+  const ridges = [];
+  const ridgeCount = type === 'valley' ? 2 : 3;
+  const ridgeDefs = [
+    { base: horizon - 30, amp: 220, key: 'mtnFar', snow: true, scale: 0.0035, depth: 4.0 },
+    { base: horizon - 5, amp: 170, key: 'mtnMid', snow: true, scale: 0.0055, depth: 2.5 },
+    { base: horizon + 30, amp: 120, key: 'mtnNear', snow: false, scale: 0.009, depth: 1.5 },
+  ];
+  for (let i = 0; i < ridgeCount; i++) {
+    const def = ridgeDefs[i];
+    const pts = [];
+    const seed = rnd(0, 1000), seedY = rnd(0, 1000);
+    for (let x = 0; x <= W; x += 6) {
+      let n = fbm(seed + x * def.scale, seedY, 5);
+      n = Math.abs(n); n = Math.pow(n * 1.55, 1.3);
+      // Lo-fi: сглаживание гор — округляем высоты
+      pts.push([x, Math.round((def.base - n * def.amp) / 3) * 3]);
+    }
+    ridges.push({ ...def, pts, topY: Math.min(...pts.map(p => p[1])) });
+  }
+
+  const trees = [];
+  const treeY = type === 'lake' ? waterY - 12 : type === 'coast' ? waterY - 4 : horizon + 40;
+  const treeCount = type === 'valley' ? rint(20, 35) : rint(35, 60);
+  for (let i = 0; i < treeCount; i++) {
+    trees.push({ x: rnd(-10, W + 10), h: type === 'valley' ? rnd(12, 35) : rnd(6, 25), shade: rnd(0, 0.5), depth: rnd(1.5, 3.0), baseSway: rnd(0, Math.PI * 2), mass: rnd(0.7, 1.3) });
+  }
+
+  const grass = [];
+  const grassTop = type === 'lake' ? waterY + 60 : type === 'coast' ? waterY + 40 : horizon + 60;
+  for (let i = 0; i < 500; i++) {
+    const depth = Math.random();
+    grass.push({ x: rnd(0, W), depth, h: rnd(3, 6 + depth * 16), shade: rnd(0.5, 1.1), curve: rnd(-1, 1) * (3 + depth * 4), baseWobble: rnd(0, Math.PI * 2) });
+  }
+
+  const rocks = [];
+  if (Math.random() < 0.6) {
+    for (let i = 0; i < rint(2, 3); i++) {
+      const cx = rnd(80, W - 80), cy = rnd(grassTop + 60, H - 40);
+      const baseR = rnd(18, 38);
+      const pts = [];
+      for (let k = 0; k < 14; k++) {
+        const a = (k / 14) * Math.PI * 2;
+        const wobble = fbm(cx * 0.05 + Math.cos(a) * 2, cy * 0.05 + Math.sin(a) * 2, 3);
+        const rr = baseR * (0.85 + wobble * 0.35);
+        pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr * 0.7]);
+      }
+      rocks.push({ pts, cx, cy, baseR, shade: rnd(0.85, 1.1) });
+    }
+  }
+
+  const clouds = [];
+  for (let i = 0; i < rint(3, 5); i++) {
+    const depth = rnd(2.5, 5.0);
+    clouds.push({ x: rnd(-150, W + 150), y: rnd(30, horizon * 0.6), scale: rnd(1.0, 2.0), depth, speedFactor: 1.0 / depth, puffs: Array.from({ length: rint(4, 6) }, () => ({ dx: rnd(-70, 70), dy: rnd(-18, 18), r: rnd(35, 65), a: rnd(0.12, 0.22) })) });
+  }
+
+  const stars = [];
+  for (let i = 0; i < 200; i++) {
+    stars.push({ x: rnd(0, W), y: rnd(0, horizon * 0.85), size: Math.pow(Math.random(), 2.5) * 1.4 + 0.3, phase: rnd(0, Math.PI * 2), baseA: rnd(0.3, 0.8) });
+  }
+
+  const birds = [];
+  for (let f = 0; f < rint(1, 2); f++) {
+    const flockDepth = rnd(1.5, 3.5);
+    const fx = rnd(0, W), fy = rnd(80, horizon * 0.5);
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    const baseSpeed = rnd(20, 35) * dir;   // медленнее — лофи спокойнее
+    for (let b = 0; b < rint(3, 5); b++) {
+      birds.push({ x: fx + rnd(-90, 90), y: fy + rnd(-30, 30), baseSpeed, depth: flockDepth, speedFactor: 1.0 / flockDepth, size: rnd(4, 7) / flockDepth * 2, wingPhase: rnd(0, Math.PI * 2), bobPhase: rnd(0, Math.PI * 2) });
+    }
+  }
+
+  const rain = [];
+  for (let i = 0; i < 100; i++) rain.push({ x: rnd(-100, W + 100), y: rnd(0, H), vy: rnd(300, 500), vx0: rnd(-30, 30), len: rnd(10, 20) });
+
+  const ripples = [];
+  for (let i = 0; i < 15; i++) ripples.push({ x: rnd(0, W), y: rnd(waterY || H * 0.7, H), t: rnd(0, 2), maxR: rnd(6, 15) });
+
+  const hills = [];
+  for (let i = 0; i < 3; i++) hills.push({ base: horizon + rnd(20, 60) + i * 30, amp: rnd(30, 70) - i * 10, seed: rnd(0, 1000) });
+
+  S = {
+    type, horizon, waterY, ridges, trees, grass, rocks, clouds, stars, birds, rain, ripples,
+    treeY, grassTop, hills,
+    sunX: W * 0.5, sunY: horizon * 0.3, sunR: 30,
+    starsSnap: -1, lastGrassR: undefined,
+  };
+  phase = [0.3, 0.4, 0.5, 0.65, 0.75, 0.9, 0.05][rint(0, 6)];
+  time = 0; staticDirty = true; reflectFrame = 0;
+  initWaves();
+}
+
+// ============================================================
+//  СТАТИЧНЫЙ СЛОЙ
+// ============================================================
+function rebuildStatic(P) {
+  staticCtx.clearRect(0, 0, W, H);
+  let groundY;
+  if (S.type === 'valley') groundY = S.horizon + 30;
+  else if (S.type === 'mountains') groundY = S.horizon + 70;
+  else if (S.type === 'lake') groundY = S.waterY + 60;
+  else groundY = S.waterY + 15;
+
+  const isSand = S.type === 'coast' && groundY > S.waterY - 20;
+  let topColor, botColor;
+  if (isSand) { topColor = P.sand; botColor = [P.sand[0] * 0.7 | 0, P.sand[1] * 0.7 | 0, P.sand[2] * 0.7 | 0]; }
+  else { topColor = P.grass; botColor = [P.grass[0] * 0.55 | 0, P.grass[1] * 0.55 | 0, P.grass[2] * 0.55 | 0]; }
+
+  if (S.type !== 'coast' || groundY > S.waterY - 20) {
+    const g = staticCtx.createLinearGradient(0, groundY, 0, H);
+    g.addColorStop(0, rgb(topColor)); g.addColorStop(1, rgb(botColor));
+    staticCtx.fillStyle = g;
+    staticCtx.beginPath(); staticCtx.moveTo(0, groundY + 20);
+    for (let x = 0; x <= W; x += 6) { const y = groundY + 20 + fbm(x * 0.012, 777, 3) * 10; staticCtx.lineTo(x, y); }
+    staticCtx.lineTo(W, H); staticCtx.lineTo(0, H); staticCtx.closePath(); staticCtx.fill();
+  }
+
+  if (S.type === 'valley') {
+    for (const h of S.hills) {
+      staticCtx.fillStyle = rgb([P.grass[0] * 0.7 | 0, P.grass[1] * 0.75 | 0, P.grass[2] * 0.65 | 0]);
+      staticCtx.beginPath(); staticCtx.moveTo(0, H);
+      for (let x = 0; x <= W; x += 10) { const y = h.base - Math.abs(fbm(h.seed + x * 0.006, 0, 3)) * h.amp; staticCtx.lineTo(x, y); }
+      staticCtx.lineTo(W, H); staticCtx.closePath(); staticCtx.fill();
+    }
+  }
+
+  // Трава — в lo-fi рисуем мягче и меньше
+  if (S.type !== 'coast') {
+    const dark = 1 - P.stars * 0.3;
+    staticCtx.lineCap = 'round';
+    for (const t of S.grass) {
+      const y = groundY + 40 + t.depth * (H - groundY - 40);
+      const r = Math.round(P.grass[0] * t.shade * dark), gg = Math.round(P.grass[1] * t.shade * dark), b = Math.round(P.grass[2] * t.shade * dark);
+      staticCtx.strokeStyle = `rgb(${r},${gg},${b})`; staticCtx.lineWidth = 1.5;
+      staticCtx.beginPath(); staticCtx.moveTo(t.x, y);
+      staticCtx.quadraticCurveTo(t.x + t.curve, y - t.h * 0.5, t.x + t.curve * 1.5, y - t.h); staticCtx.stroke();
+    }
+  }
+  staticDirty = false;
+}
+
+// ============================================================
+//  РИСОВАНИЕ
+// ============================================================
+function drawSky(P) {
+  const g = ctx.createLinearGradient(0, 0, 0, S.horizon);
+  g.addColorStop(0, rgb(P.skyTop)); g.addColorStop(0.55, rgb(P.skyMid)); g.addColorStop(1, rgb(P.skyBot));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, S.horizon + 2);
+}
+
+function drawStars(P) {
+  if (P.stars < 0.05) return;
+  const topLimit = S.horizon * 0.85;
+  for (const s of S.stars) {
+    if (s.y > topLimit) continue;
+    const tw = 0.8 + 0.2 * Math.sin(time * 0.8 + s.phase);   // медленнее мерцание
+    ctx.globalAlpha = s.baseA * tw * P.stars; ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSun(P) {
+  const arc = clamp((phase - 0.2) / 0.6, 0, 1);
+  S.sunX = W * (0.15 + 0.7 * arc);
+  S.sunY = Math.min(S.horizon - Math.sin(Math.PI * arc) * S.horizon * 0.75, S.horizon - 10);
+  S.sunR = P.sunSize * (0.9 + (1 - Math.sin(Math.PI * arc)) * 0.4);
+
+  // Lo-fi: мягкое большое размытое пятно вместо чёткого диска
+  const glow = ctx.createRadialGradient(S.sunX, S.sunY, 0, S.sunX, S.sunY, S.sunR * 16);
+  const gc = P.sunGlow;
+  glow.addColorStop(0, rgba(gc, 0.7));
+  glow.addColorStop(0.2, rgba(gc, 0.4));
+  glow.addColorStop(0.5, rgba(gc, 0.15));
+  glow.addColorStop(1, rgba(gc, 0));
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, S.horizon + 200);
+
+  // Ядро — мягкое, без резкого края
+  const core = ctx.createRadialGradient(S.sunX, S.sunY, 0, S.sunX, S.sunY, S.sunR * 1.5);
+  core.addColorStop(0, rgba(P.sunColor, 0.95));
+  core.addColorStop(0.5, rgba(P.sunColor, 0.7));
+  core.addColorStop(1, rgba(P.sunColor, 0));
+  ctx.fillStyle = core;
+  ctx.beginPath(); ctx.arc(S.sunX, S.sunY, S.sunR * 1.5, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawGodRays(P) {
+  if (P.stars > 0.5 || S.sunY > S.horizon - 30) return;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  const gc = P.sunGlow, intensity = 0.04 * (1 - P.stars);   // слабее, чем раньше
+  for (let i = 0; i < 3; i++) {
+    const baseAngle = (i / 3) * Math.PI * 2 + Math.PI / 3;
+    const angle = baseAngle + Math.sin(time * 0.15 + i) * 0.1;
+    const length = 300;
+    const x2 = S.sunX + Math.cos(angle) * length, y2 = S.sunY + Math.sin(angle) * length;
+    const grad = ctx.createLinearGradient(S.sunX, S.sunY, x2, y2);
+    grad.addColorStop(0, rgba(gc, intensity)); grad.addColorStop(1, rgba(gc, 0));
+    ctx.strokeStyle = grad; ctx.lineWidth = 60 + Math.sin(time * 0.5 + i) * 20;
+    ctx.beginPath(); ctx.moveTo(S.sunX, S.sunY); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawClouds(P, dt) {
+  const tint = P.skyBot, isNight = P.stars > 0.5;
+  const base = isNight ? [55, 55, 70] : [240, 235, 230];   // менее контрастные
+  const wind = windOn ? windSpeed() : 0, dir = windOn ? windDir() : 1;
+  const rCol = Math.round(base[0] * 0.55 + tint[0] * 0.45);
+  const gCol = Math.round(base[1] * 0.55 + tint[1] * 0.45);
+  const bCol = Math.round(base[2] * 0.55 + tint[2] * 0.45);
+
+  for (const c of S.clouds) {
+    if (!paused) c.x += wind * dir * c.speedFactor * 15 * dt;
+    if (c.x > W + 300) c.x = -300; if (c.x < -300) c.x = W + 300;
+    for (const p of c.puffs) {
+      const px = c.x + p.dx * c.scale, py = c.y + p.dy * c.scale, pr = p.r * c.scale;
+      const grd = ctx.createRadialGradient(px, py, 0, px, py, pr);
+      grd.addColorStop(0, `rgba(${rCol},${gCol},${bCol},${p.a})`);
+      grd.addColorStop(0.6, `rgba(${rCol},${gCol},${bCol},${p.a * 0.5})`);
+      grd.addColorStop(1, `rgba(${rCol},${gCol},${bCol},0)`);
+      ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+function atmosphericTint(color, depth, P) {
+  const fog = P.fogAmt * (depth - 1) * 0.35, fogC = P.fog;
+  return [
+    Math.round(lerp(color[0], fogC[0], clamp(fog, 0, 0.7))),
+    Math.round(lerp(color[1], fogC[1], clamp(fog, 0, 0.7))),
+    Math.round(lerp(color[2], fogC[2], clamp(fog, 0, 0.7))),
+  ];
+}
+
+function drawMountains(P) {
+  const colors = { mtnFar: P.mtnFar, mtnMid: P.mtnMid, mtnNear: P.mtnNear };
+  for (let i = 0; i < S.ridges.length; i++) {
+    const r = S.ridges[i];
+    let c = colors[r.key]; c = atmosphericTint(c, r.depth, P);
+    const g = ctx.createLinearGradient(S.sunX, r.topY, S.sunX, r.base + 40);
+    // Lo-fi: мягкий контраст — без ярких светов и глубоких теней
+    g.addColorStop(0, rgb([Math.min(255, c[0] + 35), Math.min(255, c[1] + 35), Math.min(255, c[2] + 30)]));
+    g.addColorStop(0.5, rgb(c));
+    g.addColorStop(1, rgb([Math.max(0, c[0] - 20), Math.max(0, c[1] - 20), Math.max(0, c[2] - 18)]));
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (const [x, y] of r.pts) ctx.lineTo(x, y);
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+
+    // Снег — очень мягкий в lo-fi
+    if (r.snow) {
+      ctx.save(); ctx.beginPath(); ctx.moveTo(0, H);
+      for (const [x, y] of r.pts) ctx.lineTo(x, y);
+      ctx.lineTo(W, H); ctx.closePath(); ctx.clip();
+      const snowY = r.topY + (r.base - r.topY) * 0.3;
+      const sg = ctx.createLinearGradient(0, r.topY, 0, snowY);
+      const snowA = 0.5 * (1 - P.stars * 0.4);
+      sg.addColorStop(0, `rgba(255,250,240,${snowA})`); sg.addColorStop(1, 'rgba(255,250,240,0)');
+      ctx.fillStyle = sg;
+      ctx.fillRect(0, Math.max(0, r.topY - 10), W, Math.max(0, snowY - r.topY + 20));
+      ctx.restore();
+    }
+  }
+}
+
+function drawWater(P, dt) {
+  if (!S.waterY) return;
+  const wy = S.waterY;
+  const g = ctx.createLinearGradient(0, wy, 0, H);
+  g.addColorStop(0, rgb(P.waterTop)); g.addColorStop(1, rgb(P.waterBot));
+  ctx.fillStyle = g; ctx.fillRect(0, wy, W, H - wy);
+
+  reflectFrame++;
+  if (reflectFrame % 8 === 0 || staticDirty) {
+    reflectCtx.clearRect(0, 0, W, H);
+    reflectCtx.save(); reflectCtx.translate(0, wy * 2); reflectCtx.scale(1, -1);
+    const colors = { mtnFar: P.mtnFar, mtnMid: P.mtnMid, mtnNear: P.mtnNear };
+    for (const r of S.ridges) {
+      let c = colors[r.key]; c = atmosphericTint(c, r.depth, P);
+      reflectCtx.fillStyle = rgb([c[0] * 0.8 | 0, c[1] * 0.8 | 0, c[2] * 0.8 | 0]);
+      reflectCtx.beginPath(); reflectCtx.moveTo(0, H);
+      for (const [x, y] of r.pts) reflectCtx.lineTo(x, y);
+      reflectCtx.lineTo(W, H); reflectCtx.closePath(); reflectCtx.fill();
+    }
+    for (const t of S.trees) {
+      const h = t.h;
+      const fr = Math.round(P.forest[0] * (1 - t.shade) * 0.7), fg = Math.round(P.forest[1] * (1 - t.shade) * 0.7), fb = Math.round(P.forest[2] * (1 - t.shade) * 0.7);
+      reflectCtx.fillStyle = `rgb(${fr},${fg},${fb})`;
+      reflectCtx.beginPath(); reflectCtx.moveTo(t.x, S.treeY - h);
+      reflectCtx.lineTo(t.x - h * 0.28, S.treeY); reflectCtx.lineTo(t.x + h * 0.28, S.treeY);
+      reflectCtx.closePath(); reflectCtx.fill();
+    }
+    const rg = reflectCtx.createRadialGradient(S.sunX, S.sunY, 0, S.sunX, S.sunY, S.sunR * 10);
+    const gc = P.sunGlow;
+    rg.addColorStop(0, rgba(gc, 0.5)); rg.addColorStop(1, rgba(gc, 0));
+    reflectCtx.fillStyle = rg; reflectCtx.fillRect(0, 0, W, wy);
+    reflectCtx.restore();
+  }
+
+  ctx.save(); ctx.beginPath(); ctx.rect(0, wy, W, H - wy); ctx.clip();
+  ctx.globalAlpha = 0.3;   // мягче отражение
+  ctx.drawImage(reflectCache, 0, 0); ctx.restore();
+  ctx.globalAlpha = 1;
+
+  // Меньше бликов — лофи спокойнее
+  const strips = 20;
+  for (let i = 0; i < strips; i++) {
+    const t = i / strips, y = wy + t * (H - wy), depthFade = 1 - t * 0.5;
+    const x = rnd(0, W), h = waterHeight(x, time) * depthFade;
+    const len = 25 + Math.abs(h) * 3, alpha = 0.04 + Math.abs(h) * 0.004;
+    ctx.fillStyle = `rgba(255,250,240,${alpha})`; ctx.fillRect(x | 0, y | 0, len, 1);
+  }
+
+  if (P.rain > 0.1) {
+    for (const rip of S.ripples) {
+      if (!paused) { rip.t += dt * 1.2; if (rip.t > 1.5) { rip.t = 0; rip.x = rnd(0, W); rip.y = rnd(wy, H); rip.maxR = rnd(6, 15); } }
+      const r = rip.t / 1.5 * rip.maxR, a = (1 - rip.t / 1.5) * 0.2 * P.rain;
+      ctx.strokeStyle = `rgba(230, 220, 210, ${a})`; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(rip.x, rip.y, r, r * 0.35, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // Солнечная дорожка — мягче
+  ctx.globalAlpha = 0.3;
+  const gc = P.sunGlow;
+  for (let i = 0; i < 15; i++) {
+    const y = wy + i * ((H - wy) / 15), waveOffset = waterHeight(S.sunX, time) * 1.5;
+    const len = (6 + Math.random() * 40) * (1 - i / 15);
+    ctx.fillStyle = rgba(gc, 0.55 - i * 0.03);
+    ctx.beginPath(); ctx.ellipse(S.sunX + waveOffset, y, len, 1.2, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTreesDynamic(P) {
+  const wind = windOn ? windSpeed() : 0;
+  for (const t of S.trees) {
+    const h = t.h;
+    const fr = Math.round(P.forest[0] * (1 - t.shade)), fg = Math.round(P.forest[1] * (1 - t.shade)), fb = Math.round(P.forest[2] * (1 - t.shade));
+    const omega = Math.sqrt(PHYS.g * 100 / (h * t.mass));
+    const sway = Math.sin(omega * time * 0.3 + t.baseSway) * wind * 0.1;   // медленнее качание
+
+    ctx.fillStyle = `rgb(${fr},${fg},${fb})`;
+    if (S.type === 'valley') {
+      const cx = t.x + sway * 2, cy = S.treeY - h + h * 0.3;
+      ctx.beginPath(); ctx.arc(cx, cy, h * 0.4, 0, Math.PI * 2);
+      ctx.arc(cx - h * 0.2, cy + h * 0.16, h * 0.3, 0, Math.PI * 2);
+      ctx.arc(cx + h * 0.2, cy + h * 0.16, h * 0.3, 0, Math.PI * 2); ctx.fill();
+    } else {
+      // Lo-fi: скруглённые силуэты деревьев
+      ctx.beginPath(); ctx.moveTo(t.x + sway, S.treeY - h);
+      ctx.quadraticCurveTo(t.x + sway + h * 0.05, S.treeY - h * 0.5, t.x + h * 0.28, S.treeY);
+      ctx.lineTo(t.x - h * 0.28, S.treeY);
+      ctx.quadraticCurveTo(t.x + sway - h * 0.05, S.treeY - h * 0.5, t.x + sway, S.treeY - h);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+function drawRocks(P) {
+  for (const rock of S.rocks) {
+    ctx.save(); ctx.translate(rock.cx, rock.cy);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';   // мягче тень
+    ctx.beginPath(); ctx.ellipse(0, rock.baseR * 0.45, rock.baseR * 1.15, rock.baseR * 0.25, 0, 0, Math.PI * 2); ctx.fill();
+    const rg = ctx.createRadialGradient(-rock.baseR * 0.35, -rock.baseR * 0.4, 2, 0, 0, rock.baseR * 1.15);
+    const rc = P.rock, lf = rock.shade;
+    rg.addColorStop(0, rgb([Math.min(255, rc[0] * lf * 1.2) | 0, Math.min(255, rc[1] * lf * 1.2) | 0, Math.min(255, rc[2] * lf * 1.2) | 0]));
+    rg.addColorStop(0.55, rgb([rc[0] * lf | 0, rc[1] * lf | 0, rc[2] * lf | 0]));
+    rg.addColorStop(1, rgb([rc[0] * lf * 0.7 | 0, rc[1] * lf * 0.7 | 0, rc[2] * lf * 0.7 | 0]));
+    ctx.fillStyle = rg;
+    const pts = rock.pts, n = pts.length, mids = [];
+    for (let i = 0; i < n; i++) { const a = pts[i], b = pts[(i + 1) % n]; mids.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]); }
+    ctx.beginPath(); ctx.moveTo(mids[0][0], mids[0][1]);
+    for (let i = 0; i < n; i++) { const curr = pts[(i + 1) % n], mid = mids[(i + 1) % n]; ctx.quadraticCurveTo(curr[0], curr[1], mid[0], mid[1]); }
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+}
+
+function drawBirds(P) {
+  if (P.stars > 0.7) return;
+  const wind = windOn ? windSpeed() : 0;
+  ctx.strokeStyle = `rgba(35, 30, 30, ${0.7 * (1 - P.stars * 0.7)})`;
+  ctx.lineCap = 'round';
+  for (const b of S.birds) {
+    if (!paused) {
+      const v = (b.baseSpeed + wind * 4) * b.speedFactor;
+      b.x += v * (1 / 60);
+      if (b.x > W + 100) b.x = -100;
+      else if (b.x < -100) b.x = W + 100;
+    }
+    const distToSun = Math.hypot(b.x - S.sunX, b.y - S.sunY);
+    if (distToSun < S.sunR * 1.5) continue;
+    const bob = Math.sin(time * 0.8 + b.bobPhase) * 2;
+    const bobV = Math.cos(time * 0.8 + b.bobPhase) * 2;
+    const wingSpeed = 3 + bobV * 1;   // медленнее взмахи
+    const wing = Math.sin(time * wingSpeed + b.wingPhase);
+    const y = b.y + bob, s = b.size, dir = b.baseSpeed > 0 ? 1 : -1;
+    ctx.lineWidth = Math.max(1, 1.5 / b.depth);
+    ctx.beginPath(); ctx.moveTo(b.x - s * dir, y + wing * s * 0.4);
+    ctx.quadraticCurveTo(b.x - s * 0.5 * dir, y - s * 0.5, b.x, y);
+    ctx.quadraticCurveTo(b.x + s * 0.5 * dir, y - s * 0.5, b.x + s * dir, y + wing * s * 0.4); ctx.stroke();
+  }
+}
+
+function drawRain(P, dt) {
+  if (P.rain < 0.05) return;
+  const wind = windOn ? windSpeed() : 0;
+  ctx.strokeStyle = `rgba(210, 200, 190, ${0.3 * P.rain})`;   // мягче
+  ctx.lineWidth = 1;
+  const rainTop = S.horizon + 20;
+
+  ctx.beginPath();
+  for (const r of S.rain) {
+    if (!paused) {
+      if (r.y < rainTop) { r.y = rainTop; }
+      else {
+        r.vy += PHYS.g * 20 * dt;
+        r.y += r.vy * dt;
+        r.x += (r.vx0 + wind * 10) * dt;
+      }
+      if (r.y > H) { r.y = rainTop; r.x = rnd(-100, W + 100); r.vy = rnd(300, 500); }
+    }
+    const angle = Math.atan2(r.vx0 + wind * 10, r.vy);
+    const dx = Math.cos(angle) * r.len, dy = Math.sin(angle) * r.len;
+    ctx.moveTo(r.x, r.y); ctx.lineTo(r.x - dx, r.y - dy);
+  }
+  ctx.stroke();
+}
+
+// ============================================================
+//  LO-FI POST-PROCESSING
+// ============================================================
+function applyLofi() {
+  if (!lofiOn) return;
+
+  // 1. Тёплый sepia-фильтр
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.globalAlpha = 0.18;
+  ctx.fillStyle = 'rgb(180, 140, 100)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  // 2. Мягкая подсветка сверху (как лампа)
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.06;
+  const warm = ctx.createRadialGradient(W / 2, 0, 0, W / 2, 0, H);
+  warm.addColorStop(0, 'rgba(255, 200, 140, 1)');
+  warm.addColorStop(1, 'rgba(255, 200, 140, 0)');
+  ctx.fillStyle = warm;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  // 3. Приглушение насыщенности через серый overlay
+  ctx.save();
+  ctx.globalCompositeOperation = 'saturation';
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = 'rgb(140, 130, 120)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  // 4. Bloom вокруг солнца (мягкий, как в лофи)
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const bloomR = S.sunR * 10;
+  const bg = ctx.createRadialGradient(S.sunX, S.sunY, 0, S.sunX, S.sunY, bloomR);
+  const gc = P_lastSunGlow;
+  bg.addColorStop(0, `rgba(${gc[0]},${gc[1]},${gc[2]},0.25)`);
+  bg.addColorStop(0.5, `rgba(${gc[0]},${gc[1]},${gc[2]},0.08)`);
+  bg.addColorStop(1, `rgba(${gc[0]},${gc[1]},${gc[2]},0)`);
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.arc(S.sunX, S.sunY, bloomR, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // 5. Глубокая виньетка (уютные углы)
+  const vg = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.85);
+  vg.addColorStop(0, 'rgba(30, 20, 15, 0)');
+  vg.addColorStop(0.5, 'rgba(30, 20, 15, 0.15)');
+  vg.addColorStop(1, 'rgba(20, 12, 8, 0.55)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  // 6. Сильное зерно плёнки (главный признак lo-fi)
+  if (grainOn) {
+    ctx.save();
+    ctx.globalAlpha = 0.14;
+    for (let i = 0; i < 800; i++) {
+      const gx = Math.random() * W, gy = Math.random() * H;
+      const gs = Math.random() * 2.5 + 0.5;
+      const bright = Math.random();
+      ctx.fillStyle = bright < 0.5
+        ? `rgba(255, 240, 220, ${0.3 + Math.random() * 0.5})`
+        : `rgba(30, 20, 15, ${0.3 + Math.random() * 0.5})`;
+      ctx.fillRect(gx | 0, gy | 0, gs, gs);
+    }
+    ctx.restore();
+  }
+
+  // 7. Легкие горизонтальные полосы (как от старого VHS)
+  if (grainOn && Math.random() < 0.02) {
+    ctx.save();
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = 'rgb(200, 180, 160)';
+    const y = Math.random() * H;
+    ctx.fillRect(0, y | 0, W, 1);
+    ctx.restore();
+  }
+
+  // КРИТИЧНО: сброс
+  ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ============================================================
+//  ГЛАВНЫЙ ЦИКЛ
+// ============================================================
+let last = performance.now();
+let fpsCounter = 0, fpsTime = performance.now(), fpsVal = 0;
+
+function frame(now) {
+  let dt = (now - last) / 1000; last = now;
+  if (dt > 0.1) dt = 0.1;
+  if (dt < 0) dt = 0;
+
+  if (!paused) {
+    time += dt;
+    if (cycleOn) phase = (phase + dt / CYCLE_LEN) % 1;
+    if (windOn) updateWind(dt);
+  }
+
+  const P = palette(phase);
+  P_lastSunGlow = P.sunGlow;
+
+  const grassR = P.grass[0];
+  const grassDiff = S.lastGrassR === undefined ? 999 : Math.abs(S.lastGrassR - grassR);
+  const starsDiff = S.starsSnap < 0 ? 1 : Math.abs(S.starsSnap - P.stars);
+  if (staticDirty || grassDiff > 6 || starsDiff > 0.15) {
+    rebuildStatic(P);
+    S.lastGrassR = grassR;
+    S.starsSnap = P.stars;
+  }
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
+
+  drawSky(P); drawStars(P); drawSun(P); drawGodRays(P);
+  drawClouds(P, dt); drawMountains(P);
+  ctx.drawImage(staticCache, 0, 0);
+  if (S.waterY) drawWater(P, dt);
+  drawTreesDynamic(P); drawRocks(P); drawBirds(P); drawRain(P, dt);
+
+  ctx.globalAlpha = 1.0;
+  ctx.globalCompositeOperation = 'source-over';
+  applyLofi();
+
+  fpsCounter++;
+  if (now - fpsTime > 500) {
+    fpsVal = Math.round(fpsCounter * 1000 / (now - fpsTime));
+    fpsCounter = 0; fpsTime = now;
+    const typeNames = { mountains: '🏔 горы', lake: '🌊 озеро', valley: '🌾 долина', coast: '🏖 берег' };
+    const cls = fpsVal < 30 ? 'low' : fpsVal < 50 ? 'mid' : 'ok';
+    const wind = windSpeed().toFixed(1), dir = windDir() > 0 ? '→' : '←';
+    document.getElementById('hud').innerHTML =
+      `<span class="${cls}">FPS: ${fpsVal}</span>\n${typeNames[S.type]}\n${P.name} · ${(phase * 100).toFixed(0)}%\n💨 ${wind} м/с ${dir}`;
+  }
+  requestAnimationFrame(frame);
+}
+
+// ============================================================
+//  КНОПКИ
+// ============================================================
+function togglePause() { paused = !paused; document.getElementById('btnPause').textContent = paused ? '▶ Продолжить' : '⏸ Пауза'; document.getElementById('btnPause').classList.toggle('toggle-off', paused); if (!paused) last = performance.now(); }
+function toggleCycle() { cycleOn = !cycleOn; document.getElementById('btnCycle').classList.toggle('toggle-off', !cycleOn); }
+function toggleWind() { windOn = !windOn; document.getElementById('btnWind').classList.toggle('toggle-off', !windOn); }
+function toggleLofi() { lofiOn = !lofiOn; document.getElementById('btnLofi').classList.toggle('toggle-off', !lofiOn); }
+function toggleGrain() { grainOn = !grainOn; document.getElementById('btnGrain').classList.toggle('toggle-off', !grainOn); }
+
+function fitCanvas() {
+  const maxW = Math.min(window.innerWidth - 32, 960);
+  canvas.style.width = maxW + 'px';
+  canvas.style.height = (maxW * H / W) + 'px';
+}
+window.addEventListener('resize', fitCanvas); fitCanvas();
+
+newScene();
+requestAnimationFrame(frame);
+</script>
+
+</body>
+</html>

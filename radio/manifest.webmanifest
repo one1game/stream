@@ -1,0 +1,16 @@
+{
+  "name": "lo-fi radio",
+  "short_name": "lo-fi",
+  "description": "Бесконечное lo-fi радио: трек собирается в браузере из зерна, поэтому эфир, ссылка и скачанный файл звучат одинаково.",
+  "lang": "ru",
+  "start_url": "./radio.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0a0810",
+  "theme_color": "#0a0810",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "name": "streem",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Процедурный YouTube-эфир: пейзаж из reneratorvideo.html + радио из radio/",
+  "type": "module",
+  "scripts": {
+    "source": "node scripts/stream_source.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
