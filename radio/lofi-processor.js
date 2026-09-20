@@ -71,6 +71,7 @@ const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 let PITCH_DRIFT = 0;
 let PITCH_DRIFT_DRUM = 0;
 let PITCH_DRIFT_BASS = 0;
+let PITCH_DRIFT_LEAD = 0;
 
 // Верхняя граница барабанов: у лофая верх всегда срезан (лента/кассета).
 // Значение задаёт сессия из характера кита, барабаны берут его по умолчанию.
@@ -121,7 +122,9 @@ const VOICES = {
   // выше 2 кГц приходилось вытягивать мастеру — а ему уже нечего было поднимать.
   rhodes:  { type:'fm',   ratio:2.0,  index:2.0, modDecay:1.2, trem:5.2, tremDepth:0.18, attack:0.012, release:0.9, lp:8600 },
   wurli:   { type:'fm',   ratio:3.0,  index:1.5, modDecay:2.0, trem:6.4, tremDepth:0.26, attack:0.010, release:0.7, lp:7600 },
-  bell:    { type:'fm',   ratio:3.51, index:2.6, modDecay:1.1, attack:0.005, release:1.6, lp:9000 },
+  // Индекс у колокольчика был 2.6 при срезе 9 кГц: звон стоял выше всей
+  // палитры и на длинных нотах бил по ушам. Тембр тот же, но скромнее.
+  bell:    { type:'fm',   ratio:3.51, index:1.9, modDecay:1.1, attack:0.005, release:1.6, lp:6800 },
   keys:    { type:'add',  h2:0.28, h3:0.22, h5:0.07, h7:0.06, hDecay:0.8, attack:0.008, release:0.8, lp:8600 },
   pluck:   { type:'add',  h2:0.50, h3:0.24, h5:0.09, h7:0.05, hDecay:4.5, attack:0.004, release:0.5, lp:8000 },
   organ:   { type:'add',  h2:0.05, h3:0.50, h5:0.22, attack:0.05, release:0.6, lp:6000 },
@@ -134,7 +137,7 @@ const VOICES = {
   elbass:  { type:'saw',  attack:0.012, release:0.35, detune:4, lp:420 },
   // Гитарная и «хрустальная» группа: щипок с быстрым спадом гармоник
   nylon:   { type:'add',  h2:0.46, h3:0.26, h5:0.09, h7:0.07, hDecay:5.5, attack:0.006, release:0.45, lp:6400 },
-  kalimba: { type:'add',  h2:0.40, h3:0.16, h5:0.06, h7:0.04, hDecay:7.5, attack:0.003, release:0.30, lp:6200 },
+  kalimba: { type:'add',  h2:0.40, h3:0.16, h5:0.06, h7:0.02, hDecay:7.5, attack:0.003, release:0.30, lp:5400 },
   // Струнный ансамбль: пила с медленной атакой и расстройкой (ширину даёт второй голос)
   strings: { type:'saw',  attack:0.42, release:1.7, lp:2600 },
   // Вокальный чап: форманта из h2/h3 через низкий срез + вибрато
@@ -506,10 +509,12 @@ class Voice {
     this.age += 1 / sr;
 
     const eng = this.engine;
-    // Дрейф ленты: у клавиш он полный, у барабанов 30% (они сняты с ленты сэмплом),
-    // у баса 15% — низ не должен «плавать» относительно бочки.
+    // Дрейф ленты: у подложки он полный, у лида 55% — звонкая нота не должна
+    // заметно «уплывать» от баса и бочки, у барабанов 30% (они сняты с ленты
+    // сэмплом), у баса 15% — низ не должен «плавать» относительно бочки.
     const drift = this.bus === 'drum' ? PITCH_DRIFT_DRUM
       : this.bus === 'bass' ? PITCH_DRIFT_BASS
+      : this.bus === 'lead' ? PITCH_DRIFT_LEAD
       : PITCH_DRIFT;
     // Вибрато (вокал, смычковые) — своё, поверх общего дрейфа
     if (eng.vib) {
@@ -1136,7 +1141,9 @@ class LofiProcessor extends AudioWorkletProcessor {
     if (!v) return;
     v.trigger({
       freq, dur, peak, bus, pan, engine, filt,
-      detune: (RNG() - 0.5) * 7,
+      // Разброс был ±3.5 цента: на длинных звонких нотах это уже слышно
+      // как расстроенность, а не как «живая» игра. Оставляем разумный минимум.
+      detune: (RNG() - 0.5) * 3.2,
       release: relOverride || (bus === 'pad' ? engine.release : Math.max(engine.release, dur * 1.4)),
     });
   }
@@ -1626,6 +1633,7 @@ class LofiProcessor extends AudioWorkletProcessor {
       PITCH_DRIFT = driftBase;
       PITCH_DRIFT_DRUM = driftBase * 0.3;
       PITCH_DRIFT_BASS = driftBase * 0.15;
+      PITCH_DRIFT_LEAD = driftBase * 0.55;
 
       // отложенные удары: свой микро-сдвиг у каждой линии
       for (const p of this.pend) {

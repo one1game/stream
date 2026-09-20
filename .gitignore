@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 
 tools/preview_out/
+
+# оффлайн-рендеры для замеров качества (radio/tools/qa-render.mjs --wav)
+radio/qa/
