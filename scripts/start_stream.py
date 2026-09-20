@@ -39,14 +39,20 @@ def ffmpeg_command(stream_key: str, seconds: int) -> list[str]:
     # Графику делает сам FFmpeg (lavfi): Python не потянет 30 fps кадров на 2 ядрах.
     background = (
         f"gradients=s={WIDTH}x{HEIGHT}:rate={FPS}:nb_colors=3"
-        ":c0=0x120c1f:c1=0x2b1b46:c2=0x090910"
-        f":speed=0.005:duration={seconds + 120}"
-        ",noise=alls=7:allf=t+u,vignette=PI/5,format=yuv420p"
+        ":c0=0x1a1430:c1=0x3a2463:c2=0x0a0912"
+        f":speed=0.004:duration={seconds + 120}"
+        ",noise=alls=3:allf=t+u,vignette=PI/5,format=yuv420p"
     )
-    # Музыка приходит из pipe как сырой PCM и рисует себе волну поверх фона.
+    # Музыка приходит из pipe сырым PCM и рисует себя сама: волна сверху и её
+    # зеркальная копия снизу — симметричная фигура, дышащая вместе с треком.
+    wave_height = HEIGHT // 2 - 20
     graph = (
-        f"[1:a]showwaves=s={WIDTH}x200:mode=cline:rate={FPS}:colors=0xb59bff@0.9[w];"
-        "[0:v][w]overlay=x=0:y=H-h-90[v]"
+        f"[1:a]showwaves=s={WIDTH}x{wave_height}:mode=cline:rate={FPS}"
+        ":colors=0xc9a7ff@0.85[wv];"
+        "[wv]split=2[wv1][wv2];"
+        "[wv2]vflip[wvf];"
+        "[0:v][wv1]overlay=0:y=20:format=auto[top];"
+        f"[top][wvf]overlay=0:y={HEIGHT // 2}[v]"
     )
     return [
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning",
