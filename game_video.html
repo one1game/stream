@@ -71,7 +71,9 @@ function ridge(x, freq, oct) {
 // ---------------------------------------------------------------- палитра
 // Всё приглушённое и тёплое: никаких чистых и ярких цветов, как в лофи.
 const rgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
-const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+// Прозрачность округляем до 1/20: иначе каждый кадр рождает новые строки
+// цветов, а под дизеринг на каждый цвет строится свой узор.
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${Math.round(a * 20) / 20})`;
 function mix(a, b, k) {
   return [Math.round(a[0] + (b[0] - a[0]) * k),
           Math.round(a[1] + (b[1] - a[1]) * k),
@@ -84,21 +86,34 @@ const TIMES = [
   { name: 'ночь',   sky: [[20, 22, 38], [32, 32, 52], [58, 50, 74]], sun: [190, 194, 206], glow: [140, 140, 168], ink: [10, 10, 20], light: 120 },
   { name: 'туман',  sky: [[86, 88, 96], [110, 110, 116], [140, 138, 138]], sun: [204, 198, 186], glow: [172, 170, 166], ink: [46, 46, 52], light: 180 },
   { name: 'гроза',  sky: [[40, 42, 56], [58, 58, 74], [86, 82, 92]], sun: [176, 176, 186], glow: [140, 138, 152], ink: [18, 18, 28], light: 140 },
+  { name: 'предрассвет', sky: [[26, 30, 54], [54, 58, 92], [104, 96, 128]], sun: [186, 186, 210], glow: [120, 120, 168], ink: [16, 18, 32], light: 150 },
+  { name: 'золотой час', sky: [[96, 74, 74], [176, 128, 92], [232, 186, 128]], sun: [255, 222, 168], glow: [232, 158, 96], ink: [44, 30, 26], light: 226 },
+  { name: 'пасмурно', sky: [[118, 122, 126], [142, 144, 146], [168, 166, 162]], sun: [214, 212, 204], glow: [180, 178, 174], ink: [52, 52, 56], light: 190 },
+  { name: 'сумерки', sky: [[34, 36, 62], [66, 62, 96], [118, 96, 118]], sun: [214, 190, 200], glow: [156, 126, 160], ink: [20, 20, 36], light: 165 },
+];
+// Атмосфера: цвет воздуха, который подмешивается к небу независимо от
+// жанра. Один и тот же киберпанк выходит то синим, то лиловым, то охристым.
+const AIR = [
+  [70, 92, 140], [190, 112, 88], [120, 152, 112], [204, 164, 108],
+  [142, 110, 152], [88, 140, 152], [178, 128, 168], [152, 142, 120],
+  [110, 128, 170], [196, 128, 120],
 ];
 function makePalette(r, genre) {
   const time = TIMES[Math.floor(r() * TIMES.length) % TIMES.length];
   const tint = GENRES[genre].tint;
+  const air = pick(r, AIR);
   const k = 0.26 + r() * 0.22;                    // насколько сильно жанр красит сцену
-  const sky = time.sky.map((c) => mix(c, tint, k));
-  const ink = mix(time.ink, tint, k * 0.5);
+  const ak = 0.16 + r() * 0.22;                   // насколько сильно красит воздух
+  const sky = time.sky.map((c) => mix(mix(c, tint, k), air, ak));
+  const ink = mix(mix(time.ink, tint, k * 0.5), air, ak * 0.35);
   // Краска жанра: единственное по-настоящему цветное пятно в кадре.
   // Небо и землю приглушаем, а герой и акценты должны читаться цветом.
-  const accent = mix(GENRES[genre].accent, time.sun, 0.12 + r() * 0.16);
+  const accent = mix(mix(GENRES[genre].accent, time.sun, 0.12 + r() * 0.16), air, r() * 0.25);
   return {
     time: time.name,
     sky,
     sun: mix(time.sun, tint, k * 0.4),
-    glow: mix(time.glow, tint, k * 0.6),
+    glow: mix(mix(time.glow, tint, k * 0.6), air, ak * 0.5),
     ink,
     // Три ступени глубины. Дальше — темнее, ближе — светлее; на этом
     // держится читаемость: герой всегда рисуется светлым на тёмном.
@@ -108,6 +123,47 @@ function makePalette(r, genre) {
     pale: mix(accent, [255, 248, 238], 0.55),
     fog: mix(sky[1], [180, 178, 176], 0.35),
     fogAmt: 0.25 + r() * 0.35,
+  };
+}
+
+// ---------------------------------------------------------------- камера
+// У каждой игры своя камера и своя плёнка: общий план или крупный, тёплая
+// или холодная, с полосами или без. Две игры одного жанра сняты по-разному.
+const GRADES = {
+  none: null,
+  cold: { mul: [186, 208, 255], screen: [8, 16, 38] },
+  warm: { mul: [255, 226, 188], screen: [34, 16, 6] },
+  fade: { mul: [216, 220, 226], screen: [34, 34, 40] },
+  neon: { mul: [242, 196, 246], screen: [16, 6, 30] },
+  moss: { mul: [206, 234, 200], screen: [10, 24, 14] },
+};
+// Насколько камере можно гулять по сцене. Пейзаж можно резать смело,
+// а вагон или платформу — нет: там весь смысл в том, что видно целиком.
+const LOOK_FREE = {
+  platformer: 1, rpg: 1, underwater: 1, snow: 1, island: 1, desert: 1, lighthouse: 1, dragon: 1,
+  space: 0.8, shooter: 0.8, abstract: 0.8, vapor: 0.8, cyber: 0.7,
+  train: 0.4, subway: 0.4, observatory: 0.4, dungeon: 0.45, duel: 0.45, ruins: 0.6,
+};
+function makeLook(r, genre) {
+  // sx/sy — масштаб кадра по осям. Кадр всегда чуть обрезан и растянут
+  // (как плёнка другого формата), поэтому горизонт в каждой игре стоит
+  // на своей высоте и кадр берёт то небо, то землю.
+  const free = LOOK_FREE[genre] === undefined ? 1 : LOOK_FREE[genre];
+  const sx = 1 + free * (0.05 + r() * 0.45);
+  const sy = 1 + free * (r() * 0.4);
+  const freeX = VW - VW / sx, freeY = VH - VH / sy;
+  return {
+    sx, sy,
+    camX: r() * freeX,
+    camY: r() * freeY,
+    mirror: free > 0.6 && r() < 0.35,
+    grade: pick(r, ['none', 'none', 'cold', 'warm', 'fade', 'neon', 'moss']),
+    gradeAmt: 0.5 + r() * 0.5,
+    vig: 0.35 + r() * 0.4,
+    scan: r() < 0.7 ? 0.07 : 0.14,
+    bars: r() < 0.3,
+    tint: pick(r, AIR),
+    tintAmt: r() < 0.45 ? 0.03 + r() * 0.05 : 0,
   };
 }
 
@@ -229,15 +285,15 @@ function silhouette(seed, baseY, amp, freq, color, step) {
 const ditherPatterns = new Map();
 function ditherPattern(c) {
   let p = ditherPatterns.get(c);
-  if (!p) {
-    const tile = document.createElement('canvas');
-    tile.width = 2; tile.height = 2;
-    const tg = tile.getContext('2d');
-    tg.fillStyle = c;
-    tg.fillRect(0, 0, 1, 1);
-    p = g.createPattern(tile, 'repeat');
-    ditherPatterns.set(c, p);
-  }
+  if (p) return p;
+  if (ditherPatterns.size > 400) ditherPatterns.clear();      // страховка от роста
+  const tile = document.createElement('canvas');
+  tile.width = 2; tile.height = 2;
+  const tg = tile.getContext('2d');
+  tg.fillStyle = c;
+  tg.fillRect(0, 0, 1, 1);
+  p = g.createPattern(tile, 'repeat');
+  ditherPatterns.set(c, p);
   return p;
 }
 function ditherFill(x, y, w, h, c, parity) {
@@ -680,10 +736,14 @@ function drawCyber(s, P, t) {
 
 // --- подземелье: кладка, арки, факелы, капли, сундук
 function buildDungeon(r, P) {
+  // Четыре оттенка камня считаем один раз: если красить каждый кирпич
+  // своим цветом, кадр дорожает на ровном месте.
+  const base = mix(P.sky[2], P.ink, 0.5);
   return {
+    shades: [0.25, 0.37, 0.49, 0.61].map((k) => rgb(mix(P.ink, base, k))),
     bricks: Array.from({ length: 26 * 12 }, (_, i) => ({
       x: (i % 26) * 12 + ((Math.floor(i / 26) % 2) * 6), y: Math.floor(i / 26) * 12,
-      s: hash1(i * 7 + 3),
+      s: Math.abs(hash1(i * 7 + 3)),
     })),
     torches: Array.from({ length: 3 }, (_, i) => ({ x: 52 + i * 108, y: 66, p: r() * 6 })),
     drops: Array.from({ length: 6 }, () => ({ x: r() * VW, y: r() * VH, v: rndRange(r, 20, 50) })),
@@ -692,11 +752,11 @@ function buildDungeon(r, P) {
 }
 function drawDungeon(s, P, t) {
   rect(0, 0, VW, VH, rgb(mix(P.ink, P.sky[0], 0.22)));
+  const sh = s.shades;
   for (const b of s.bricks) {
-    const shade = 0.5 + b.s * 0.5;
-    rect(b.x, b.y, 11, 11, rgb(mix(P.ink, mix(P.sky[2], P.ink, 0.5), 0.25 + shade * 0.35)));
-    rect(b.x, b.y + 10, 11, 1, rgba(P.ink, 0.7));
-    rect(b.x + 10, b.y, 1, 11, rgba(P.ink, 0.5));
+    rect(b.x, b.y, 11, 11, sh[Math.min(3, (b.s * 4) | 0)]);
+    rect(b.x, b.y + 10, 11, 1, 'rgba(0,0,0,0.35)');
+    rect(b.x + 10, b.y, 1, 11, 'rgba(0,0,0,0.25)');
   }
   // арки
   for (let i = 0; i < 2; i++) {
@@ -2212,6 +2272,8 @@ const director = {
   brandKind: 'plank',
   brandPos: [0, 0],
   weather: null,
+  look: null,       // камера и плёнка этой игры
+  history: [],      // последние жанры: чтобы игры не повторялись подряд
   flash: 0,         // вспышка молнии
   title: '',
   objective: '',
@@ -2240,8 +2302,20 @@ function newScene(genre, seed, now) {
   // не стояла в одном и том же месте кадра
   director.brandKind = pick(r, BRAND_KIND[genre] || ['plank']);
   const bp = BRAND_POS[genre] || [12, 120];
-  director.brandPos = [bp[0] + Math.round(rndRange(r, -5, 5)), bp[1] + Math.round(rndRange(r, -4, 4))];
   director.weather = makeWeather(r, genre, director.palette.time);
+  director.look = makeLook(r, genre);
+  // Камера может взять крупный план и увести кадр в сторону — тогда вывеску
+  // загоняем в видимую область, иначе она окажется за краем.
+  const L = director.look;
+  const bw = textWidth(BRAND, 1) + 6, bh = 38;
+  const visW = VW / L.sx, visH = VH / L.sy;
+  const x0 = L.mirror ? VW - L.camX - visW : L.camX;
+  const bx = Math.min(Math.max(bp[0] + rndRange(r, -5, 5), x0 + 5), x0 + visW - bw - 5);
+  const by = Math.min(Math.max(bp[1] + rndRange(r, -4, 4), L.camY + 26),
+    L.camY + Math.min(visH - 10, 148 / L.sy) - bh);
+  director.brandPos = [bx, by];
+  director.history.push(genre);
+  if (director.history.length > 6) director.history.shift();
   director.startedAt = now;
   director.fade = 1;
   director.shot = 0;
@@ -2250,14 +2324,17 @@ function newScene(genre, seed, now) {
 function chooseGenre(track, mood, now) {
   const r = mulberry32((director.seed + track * 7919 + 13) >>> 0);
   const mapped = MOOD_GENRE[mood];
-  // Обычно жанр подсказан музыкой, но иногда режиссёр удивляет:
-  // иначе связка «трек - сцена» читается слишком предсказуемо.
-  let genre;
-  if (mapped && r() < 0.72) genre = pick(r, mapped);
-  else genre = pick(r, GENRE_KEYS);
-  if (genre === director.genre) {
-    const alt = GENRE_KEYS.filter((k) => k !== director.genre);
-    genre = pick(r, alt);
+  // Жанр, который только что был, не повторяем: зритель не должен видеть
+  // две похожие игры подряд.
+  const free = (list) => list.filter((g) => director.history.indexOf(g) < 0);
+  let genre = null;
+  if (mapped && r() < 0.72) {
+    const pool = free(mapped);
+    if (pool.length) genre = pick(r, pool);
+  }
+  if (!genre) {
+    const pool = free(GENRE_KEYS);
+    genre = pool.length ? pick(r, pool) : pick(r, GENRE_KEYS);
   }
   return genre;
 }
@@ -2361,17 +2438,19 @@ function drawTitleCard(P, t) {
 }
 
 function drawFrameOverlay(P, t) {
-  // виньетка и мягкий тёплый свет — общий лофи-слой поверх любой сцены
-  const vg = g.createRadialGradient(VW / 2, VH / 2, VH * 0.35, VW / 2, VH / 2, VH * 1.05);
+  const L = director.look;
+  // виньетка и мягкий свет: плотность у каждой игры своя
+  const vg = g.createRadialGradient(VW / 2, VH / 2, VH * (0.28 + L.vig * 0.3), VW / 2, VH / 2, VH * 1.05);
   vg.addColorStop(0, 'rgba(0,0,0,0)');
-  vg.addColorStop(1, 'rgba(10,8,14,0.55)');
+  vg.addColorStop(1, `rgba(10,8,14,${L.vig.toFixed(2)})`);
   paint(vg); g.fillRect(0, 0, VW, VH);
   g.globalAlpha = 0.05 + 0.02 * Math.sin(t * 0.7);
   paint(rgb(mix(P.accent, P.sun, 0.5)));
   g.fillRect(0, 0, VW, VH);
   g.globalAlpha = 1;
   // строки развёртки
-  for (let y = 0; y < VH; y += 3) rect(0, y, VW, 1, 'rgba(0,0,0,0.07)');
+  const scan = `rgba(0,0,0,${L.scan.toFixed(2)})`;
+  for (let y = 0; y < VH; y += 3) rect(0, y, VW, 1, scan);
 }
 
 // ---------------------------------------------------------------- цикл
@@ -2408,6 +2487,7 @@ function frame(now) {
   director.fade = Math.max(0, director.fade - dt * 1.4);
 
   const P = director.palette;
+  const L = director.look;
   NOW = t;
   // тряска камеры: сцены заявляют её при попаданиях
   let sx = 0, sy = 0;
@@ -2416,14 +2496,24 @@ function frame(now) {
     sx = (Math.random() - 0.5) * director.shake * 3.5;
     sy = (Math.random() - 0.5) * director.shake * 2.5;
   }
+  // Камера игры: общий план или крупный, иногда зеркальный. Мир рисуется
+  // в своих 320x180, поэтому зум — это просто другой масштаб, а не пересчёт.
+  // Основа кадра — небо во весь мир. Сцены рисуют поверх; если какая-то
+  // оставит пустоту (или камера уедет за её пределы), там будет небо,
+  // а не мусор от предыдущего кадра.
   g.save();
-  g.translate(Math.round(sx), Math.round(sy));
+  if (L.mirror) { g.translate(VW, 0); g.scale(-1, 1); }
+  g.scale(L.sx, L.sy);
+  g.translate(-L.camX + sx / L.sx, -L.camY + sy / L.sy);
+  bandGradient(-8, VH + 8, [P.sky[0], P.sky[1], P.sky[2]]);
   SCENES[director.genre].draw(director.scene, P, t - director.startedAt, dt);
-  // вывеска живёт в мире сцены и дрожит вместе с камерой; во время
-  // вступительной карточки её не видно, чтобы не спорить с титрами
+  // подпись канала: часть сцены, но текст нельзя зеркалить вместе с миром
   if (t - director.startedAt > 5.4) {
     const bp = director.brandPos;
+    g.save();
+    if (L.mirror) { g.translate(2 * (bp[0] + (textWidth(BRAND, 1) + 6) / 2), 0); g.scale(-1, 1); }
     brand(bp[0], bp[1], P, director.brandKind, (director.seed & 3) !== 0, t - director.startedAt);
+    g.restore(); resetPaint();
   }
   drawWeather(P, t - director.startedAt, dt);
   g.restore(); resetPaint();
@@ -2443,6 +2533,32 @@ function frame(now) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, OUT_W, OUT_H);
   ctx.drawImage(world, OFF_X, OFF_Y, VW * SCALE, VH * SCALE);
+  // плёнка: у одной игры тёплая, у другой холодная, у третьей выцветшая
+  const GR = GRADES[L.grade];
+  if (GR) {
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = L.gradeAmt;
+    ctx.fillStyle = rgb(GR.mul);
+    ctx.fillRect(0, 0, OUT_W, OUT_H);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = L.gradeAmt * 0.7;
+    ctx.fillStyle = rgb(GR.screen);
+    ctx.fillRect(0, 0, OUT_W, OUT_H);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+  if (L.tintAmt > 0) {
+    ctx.globalAlpha = L.tintAmt;
+    ctx.fillStyle = rgb(L.tint);
+    ctx.fillRect(0, 0, OUT_W, OUT_H);
+    ctx.globalAlpha = 1;
+  }
+  if (L.bars) {                                   // кинематографичные полосы
+    const bh = Math.round(OUT_H * 0.075);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, OUT_W, bh);
+    ctx.fillRect(0, OUT_H - bh, OUT_W, bh);
+  }
   if (director.fade > 0) {
     ctx.fillStyle = `rgba(0,0,0,${director.fade})`;
     ctx.fillRect(0, 0, OUT_W, OUT_H);
