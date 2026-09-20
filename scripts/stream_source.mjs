@@ -41,6 +41,10 @@ const SR = 44100;
 const SAMPLES_PER_FRAME = SR / FPS;
 const FRAME_MS = 1000 / FPS;
 const SEED = Number(args.seed || Math.floor(Math.random() * 0xffffffff)) >>> 0;
+// Режим репетиции: сцена меняется каждые N секунд, не дожидаясь нового трека.
+// Нужен только для локального просмотра, в эфире не используется.
+if (args.rehearse) globalThis.SCENE_SWITCH_SEC = Number(args.rehearse);
+if (args.genre) globalThis.SCENE_FORCE = String(args.genre);
 
 const fail = (msg) => { process.stderr.write(`stream_source: ${msg}\n`); process.exit(1); };
 

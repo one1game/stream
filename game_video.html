@@ -79,7 +79,7 @@ function mix(a, b, k) {
 }
 const TIMES = [
   { name: 'рассвет', sky: [[62, 60, 86], [122, 96, 108], [186, 138, 118]], sun: [226, 190, 156], glow: [198, 142, 112], ink: [30, 26, 40], light: 205 },
-  { name: 'день',   sky: [[96, 112, 136], [132, 146, 162], [176, 176, 168]], sun: [226, 220, 196], glow: [196, 186, 164], ink: [38, 40, 46], light: 220 },
+  { name: 'день',   sky: [[74, 104, 146], [126, 152, 176], [186, 194, 190]], sun: [226, 220, 196], glow: [196, 186, 164], ink: [38, 40, 46], light: 220 },
   { name: 'закат',  sky: [[58, 52, 78], [140, 92, 96], [206, 146, 112]], sun: [232, 190, 148], glow: [208, 136, 104], ink: [26, 22, 36], light: 215 },
   { name: 'ночь',   sky: [[20, 22, 38], [32, 32, 52], [58, 50, 74]], sun: [190, 194, 206], glow: [140, 140, 168], ink: [10, 10, 20], light: 120 },
   { name: 'туман',  sky: [[86, 88, 96], [110, 110, 116], [140, 138, 138]], sun: [204, 198, 186], glow: [172, 170, 166], ink: [46, 46, 52], light: 180 },
@@ -88,17 +88,24 @@ const TIMES = [
 function makePalette(r, genre) {
   const time = TIMES[Math.floor(r() * TIMES.length) % TIMES.length];
   const tint = GENRES[genre].tint;
-  const k = 0.22 + r() * 0.2;                     // насколько сильно жанр красит сцену
+  const k = 0.26 + r() * 0.22;                    // насколько сильно жанр красит сцену
   const sky = time.sky.map((c) => mix(c, tint, k));
   const ink = mix(time.ink, tint, k * 0.5);
+  // Краска жанра: единственное по-настоящему цветное пятно в кадре.
+  // Небо и землю приглушаем, а герой и акценты должны читаться цветом.
+  const accent = mix(GENRES[genre].accent, time.sun, 0.12 + r() * 0.16);
   return {
     time: time.name,
     sky,
-    sun: mix(time.sun, tint, k * 0.5),
+    sun: mix(time.sun, tint, k * 0.4),
     glow: mix(time.glow, tint, k * 0.6),
     ink,
+    // Три ступени глубины. Дальше — темнее, ближе — светлее; на этом
+    // держится читаемость: герой всегда рисуется светлым на тёмном.
+    deep: mix(ink, [0, 0, 0], 0.45),
     light: time.light,
-    accent: mix(tint, [255, 236, 220], 0.25 + r() * 0.15),
+    accent,
+    pale: mix(accent, [255, 248, 238], 0.55),
     fog: mix(sky[1], [180, 178, 176], 0.35),
     fogAmt: 0.25 + r() * 0.35,
   };
@@ -223,17 +230,155 @@ function glow(x, y, r, color, alpha) {
   g.globalAlpha = 1;
 }
 
+// ---------------------------------------------------------------- спрайты
+// Рисуются из строк: символ — цвет из карты. Так фигурка читается прямо
+// в коде и её легко править, а анимация — это просто второй кадр.
+const SPRITES = {
+  heroA: [
+    '..aaa..',
+    '.addda.',
+    '.addda.',
+    '.aaaaa.',
+    '..bbb..',
+    '.bbbbb.',
+    'bbbbbbb',
+    '.bbbbb.',
+    '..b.b..',
+    '..b.b..',
+    '..c.c..',
+    '..c.c..',
+  ],
+  heroB: [
+    '..aaa..',
+    '.addda.',
+    '.addda.',
+    '.aaaaa.',
+    '..bbb..',
+    '.bbbbb.',
+    'bbbbbbb',
+    '.bbbbb.',
+    '..b.b..',
+    '.b...b.',
+    '.c...c.',
+    'cc...cc',
+  ],
+  ship: [
+    '....a....',
+    '...aaa...',
+    '..aeaea..',
+    '.eeeeeee.',
+    'aaeaeaeaa',
+    '...fff...',
+    '..f...f..',
+  ],
+  boat: [
+    '...d...',
+    '..ddd..',
+    '.dddddd',
+    'bbbbbbb',
+    '.bbbbb.',
+    '..bbb..',
+  ],
+  fishA: [
+    '.aa..',
+    'aaaaa',
+    '.aa..',
+  ],
+  fishB: [
+    'aa.a.',
+    '.aaa.',
+    'aa.a.',
+  ],
+  birdA: [
+    'a...a',
+    '.aaa.',
+  ],
+  birdB: [
+    '.aaa.',
+    'a...a',
+  ],
+};
+function sprite(art, x, y, map, flip, scale) {
+  const h = art.length, w = art[0].length;
+  const s = scale || 1;
+  for (let row = 0; row < h; row++) {
+    const line = art[row];
+    for (let col = 0; col < w; col++) {
+      const ch = line[flip ? w - 1 - col : col];
+      const color = map[ch];
+      if (color) rect(x + col * s, y + row * s, s, s, color);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- частицы
+// Один общий механизм на все сцены: пыль, угли, светлячки, искры, снег.
+function particles(r, n, cfg) {
+  return Array.from({ length: n }, () => ({
+    x: r() * VW,
+    y: cfg.spanY ? rndRange(r, cfg.spanY[0], cfg.spanY[1]) : r() * VH,
+    vx: rndRange(r, cfg.vx[0], cfg.vx[1]),
+    vy: rndRange(r, cfg.vy[0], cfg.vy[1]),
+    s: cfg.size ? rndRange(r, cfg.size[0], cfg.size[1]) : 1,
+    p: r() * 6.28,
+  }));
+}
+function drift(list, cfg, dt, color) {
+  const amp = cfg.wobble || 0;
+  for (const p of list) {
+    p.x += (p.vx + Math.sin(NOW * cfg.wobbleFreq + p.p) * amp) * dt;
+    p.y += p.vy * dt;
+    if (p.y < -3) { p.y = VH + 3; p.x = Math.random() * VW; }
+    else if (p.y > VH + 3) { p.y = -3; p.x = Math.random() * VW; }
+    if (p.x < -3) p.x = VW + 3;
+    else if (p.x > VW + 3) p.x = -3;
+    const a = cfg.fade ? cfg.fade(p) : 1;
+    if (a > 0.05) rect(p.x, p.y, p.s, p.s, typeof color === 'function' ? color(p) : color);
+  }
+}
+// Взрыв: короткий росчерк искр с затуханием. Живёт в списке, который
+// сцена сама заводит и чистит.
+function burst(list, x, y, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const v = speed * (0.35 + Math.random() * 0.65);
+    list.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.35 + Math.random() * 0.4, age: 0 });
+  }
+}
+function stepBurst(list, dt, colors) {
+  for (let i = list.length - 1; i >= 0; i--) {
+    const b = list[i];
+    b.age += dt;
+    if (b.age >= b.life) { list.splice(i, 1); continue; }
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    b.vx *= 0.94; b.vy = b.vy * 0.94 + 6 * dt;
+    const k = 1 - b.age / b.life;
+    rect(b.x, b.y, k > 0.55 ? 2 : 1, k > 0.55 ? 2 : 1, colors[k > 0.6 ? 0 : (k > 0.3 ? 1 : 2)]);
+  }
+}
+
+// Всплывающие очки и цель уровня — то, что делает сцену похожей на игру.
+function popup(text, x, y) {
+  director.pops.push({ text, x, y, born: NOW });
+  if (director.pops.length > 14) director.pops.shift();
+}
+function shake(power) { director.shake = Math.max(director.shake, power); }
+
 // ---------------------------------------------------------------- жанры
 const GENRES = {
-  platformer: { label: 'PLATFORMER', tint: [150, 132, 96] },
-  rpg:        { label: 'ROLE-PLAYING', tint: [140, 120, 92] },
-  space:      { label: 'SPACE SHOOTER', tint: [96, 104, 148] },
-  cyber:      { label: 'NEON NOIR', tint: [130, 84, 140] },
-  dungeon:    { label: 'DUNGEON CRAWLER', tint: [126, 104, 96] },
-  underwater: { label: 'DEEP DIVER', tint: [84, 118, 134] },
-  vapor:      { label: 'RETRO RACER', tint: [156, 108, 130] },
-  snow:       { label: 'WINTER JOURNEY', tint: [132, 138, 152] },
-  abstract:   { label: 'ART PROJECT', tint: [116, 108, 140] },
+  platformer: { label: 'PLATFORMER', tint: [150, 132, 96], accent: [188, 142, 74], objective: 'REACH THE SUMMIT' },
+  rpg:        { label: 'ROLE-PLAYING', tint: [140, 120, 92], accent: [156, 178, 104], objective: 'FIND THE LANTERN' },
+  space:      { label: 'SPACE SHOOTER', tint: [96, 104, 148], accent: [104, 146, 202], objective: 'SCAN THE SECTOR' },
+  cyber:      { label: 'NEON NOIR', tint: [130, 84, 140], accent: [186, 88, 176], objective: 'TRACE THE SIGNAL' },
+  dungeon:    { label: 'DUNGEON CRAWLER', tint: [126, 104, 96], accent: [190, 126, 62], objective: 'OPEN THE VAULT' },
+  underwater: { label: 'DEEP DIVER', tint: [84, 118, 134], accent: [78, 176, 178], objective: 'DIVE DEEPER' },
+  vapor:      { label: 'RETRO RACER', tint: [156, 108, 130], accent: [212, 108, 152], objective: 'OUTRUN THE SUNSET' },
+  snow:       { label: 'WINTER JOURNEY', tint: [132, 138, 152], accent: [138, 176, 210], objective: 'FIND THE CABIN' },
+  abstract:   { label: 'ART PROJECT', tint: [116, 108, 140], accent: [142, 118, 196], objective: 'OBSERVE' },
+  shooter:    { label: 'ARCADE SHOOTER', tint: [104, 96, 152], accent: [88, 168, 208], objective: 'DESTROY THE DRIFT' },
+  duel:       { label: 'FIGHTING', tint: [150, 106, 96], accent: [212, 132, 78], objective: 'WIN THE ROUND' },
+  dragon:     { label: 'ACTION ADVENTURE', tint: [122, 92, 110], accent: [200, 96, 88], objective: 'SLAY THE WYRM' },
+  island:     { label: 'ADVENTURE', tint: [110, 130, 132], accent: [104, 180, 150], objective: 'REACH THE SHORE' },
 };
 const GENRE_KEYS = Object.keys(GENRES);
 
@@ -731,6 +876,488 @@ function drawAbstract(s, P, t) {
   }
 }
 
+// --- космический шутер: корабль, выстрелы, взрывы, тряска
+function buildShooter(r, P) {
+  return {
+    stars: [
+      { list: Array.from({ length: 54 }, () => ({ x: r() * VW, y: r() * VH })), v: 9 },
+      { list: Array.from({ length: 26 }, () => ({ x: r() * VW, y: r() * VH })), v: 24 },
+    ],
+    planet: { x: rndRange(r, 206, 272), y: rndRange(r, 32, 58), rad: rndRange(r, 18, 27), p: r() * 6 },
+    nebulae: Array.from({ length: 3 }, (_, i) => ({
+      x: r() * VW, y: 20 + i * 46, w: rndRange(r, 70, 130), h: rndRange(r, 16, 30), s: rndRange(r, 3, 7),
+    })),
+    rocks: Array.from({ length: 9 }, () => ({
+      x: rndRange(r, 40, VW + 90), y: rndRange(r, 22, VH - 46),
+      s: rndRange(r, 4, 9), v: rndRange(r, 16, 34), p: r() * 6,
+    })),
+    foes: Array.from({ length: 3 }, () => ({
+      x: rndRange(r, VW + 30, VW + 240), y: rndRange(r, 24, VH - 54), v: rndRange(r, 10, 20), p: r() * 6,
+    })),
+    bullets: [], enemyBullets: [], sparks: [], exhaust: [],
+    playerY: VH * 0.52, fireAt: 0, foeFireAt: 0, hurt: 0, hits: 0,
+  };
+}
+function drawShooter(s, P, t, dt) {
+  rect(0, 0, VW, VH, rgb(mix(P.deep, P.sky[0], 0.16)));
+  // туманности и далёкая планета: им нужен объём за спиной, иначе
+  // космос выглядит пустым чёрным полем
+  for (const n of s.nebulae) {
+    const x = ((n.x - t * n.s) % (VW + n.w) + VW + n.w) % (VW + n.w) - n.w + n.w / 2;
+    for (let dy = -n.h; dy <= n.h; dy += 2) {
+      const k = 1 - (dy * dy) / (n.h * n.h);
+      if (k <= 0) continue;
+      const w = Math.round(n.w * 0.5 * Math.sqrt(k));
+      ditherFill(x - w, n.y + dy, w * 2, 2, rgba(mix(P.glow, P.accent, 0.4), 0.14), dy & 2);
+    }
+    ditherFill(x - n.w * 0.2, n.y - 3, n.w * 0.4, 6, rgba(mix(P.accent, P.sun, 0.4), 0.12), 1);
+  }
+  const pl = s.planet;
+  glow(pl.x, pl.y, pl.rad * 2.4, rgba(P.glow, 0.1), 1);
+  const rx = pl.rad * 1.5, ry = pl.rad * 0.3;                   // кольцо позади планеты
+  g.globalAlpha = 0.4;
+  for (let x = -rx; x <= rx; x++) {
+    const yy = Math.round(ry * Math.sqrt(Math.max(0, 1 - (x * x) / (rx * rx))));
+    rect(pl.x + x, pl.y - yy, 1, 1, rgba(mix(P.sun, P.accent, 0.45), 0.6));
+    rect(pl.x + x, pl.y + yy, 1, 1, rgba(mix(P.deep, P.accent, 0.4), 0.7));
+  }
+  g.globalAlpha = 1;
+  for (let y = -pl.rad; y <= pl.rad; y++) {
+    const dx = Math.sqrt(Math.max(0, pl.rad * pl.rad - y * y)) | 0;
+    const lit = 0.42 - (y / pl.rad) * 0.36;
+    rect(pl.x - dx, pl.y + y, dx * 2, 1, rgb(mix(P.deep, mix(P.accent, P.sun, 0.35), lit)));
+  }
+  for (const layer of s.stars) {
+    for (const st of layer.list) {
+      st.x -= layer.v * dt;
+      if (st.x < -2) { st.x = VW + Math.random() * 8; st.y = Math.random() * VH; }
+      rect(st.x, st.y, 1, 1, rgba(P.sun, layer.v > 15 ? 0.95 : 0.5));
+    }
+  }
+  // астероиды: летят навстречу, освещены сверху светом планеты
+  for (const rk of s.rocks) {
+    rk.x -= rk.v * dt;
+    if (rk.x < -18) { rk.x = VW + Math.random() * 60; rk.y = 20 + Math.random() * (VH - 70); rk.s = 5 + Math.random() * 8; }
+    const wob = Math.sin(t * 2 + rk.p) * 1.5;
+    for (let y = -rk.s; y <= rk.s; y++) {
+      const dx = Math.sqrt(Math.max(0, rk.s * rk.s - y * y)) | 0;
+      rect(rk.x - dx, rk.y + y + wob, dx * 2, 1, rgb(mix(P.deep, P.sky[1], 0.16)));
+    }
+    for (let y = -rk.s * 0.7; y <= -rk.s * 0.1; y++) {          // подсвеченный бок
+      const dx = Math.sqrt(Math.max(0, rk.s * rk.s - y * y)) | 0;
+      rect(rk.x - dx, rk.y + y + wob + 1, Math.max(1, dx * 0.5), 1, rgba(mix(P.accent, P.glow, 0.4), 0.35));
+    }
+    rect(rk.x - rk.s * 0.3, rk.y + rk.s * 0.2 + wob, 3, 2, rgba(P.deep, 0.8));   // кратеры
+    rect(rk.x + rk.s * 0.2, rk.y - rk.s * 0.35 + wob, 2, 2, rgba(P.deep, 0.6));
+  }
+  // враги
+  for (const f of s.foes) {
+    f.x -= f.v * dt;
+    const y = f.y + Math.sin(t * 1.6 + f.p) * 6;
+    if (f.x < -24) { f.x = VW + 40 + Math.random() * 120; f.y = 24 + Math.random() * (VH - 60); }
+    if (Math.random() < 0.4) s.exhaust.push({ x: f.x + 19, y: y + 6, life: 0.4, age: 0 });
+    sprite(SPRITES.ship, f.x, y, {
+      a: rgb(mix(P.deep, P.accent, 0.3)), e: rgb(mix(P.deep, [220, 120, 110], 0.4)),
+      f: rgba(mix([255, 170, 150], P.accent, 0.3), 0.95),
+    }, true, 2);
+  }
+  // игрок
+  const py = s.playerY + Math.sin(t * 1.1) * 5;
+  s.playerY = py;
+  if (Math.random() < 0.7) s.exhaust.push({ x: 40, y: py + 9, life: 0.5, age: 0 });
+  drift(s.exhaust, { vx: [-46, -20], vy: [-4, 4], fade: (p) => 1 - p.life / 0.5 }, dt, rgba(mix(P.accent, P.sun, 0.3), 0.55));
+  s.exhaust = s.exhaust.filter((p) => { p.life -= dt; return p.life > 0; });
+  if (s.fireAt > 0.06) glow(78, py + 7, 5, rgba(mix(P.sun, [255, 240, 200], 0.5), 0.4), 1);
+  sprite(SPRITES.ship, 44, py, {
+    a: rgb(mix(P.pale, P.sun, 0.35)), e: rgb(mix(P.accent, P.deep, 0.35)), f: rgba(P.sun, 0.95),
+  }, false, 2);
+  // стрельба и попадания
+  s.fireAt -= dt;
+  if (s.fireAt <= 0) { s.fireAt = 0.26; s.bullets.push({ x: 82, y: py + 7 }); }
+  s.foeFireAt -= dt;
+  if (s.foeFireAt <= 0 && s.foes.length) {
+    s.foeFireAt = 1.3;
+    const f = s.foes[Math.floor(Math.random() * s.foes.length)];
+    s.enemyBullets.push({ x: f.x, y: f.y + 7 });
+  }
+  for (let i = s.bullets.length - 1; i >= 0; i--) {
+    const b = s.bullets[i];
+    b.x += 150 * dt;
+    rect(b.x - 6, b.y, 6, 1, rgba(mix(P.sun, P.accent, 0.3), 0.4));
+    rect(b.x, b.y, 5, 2, rgba(mix(P.sun, [255, 250, 230], 0.6), 0.98));
+    if (b.x > VW + 6) { s.bullets.splice(i, 1); continue; }
+    let hit = false;
+    for (const rk of s.rocks) {
+      if (Math.hypot(b.x - rk.x, b.y - rk.y) < rk.s + 2) {
+        burst(s.sparks, rk.x, rk.y, 14, 52);
+        popup('+' + (100 + Math.floor(Math.random() * 20) * 10), Math.max(6, rk.x - 8), rk.y - 6);
+        rk.x = -20; hit = true; s.hits++;
+        shake(0.5);
+        break;
+      }
+    }
+    for (const f of s.foes) {
+      if (!hit && Math.abs(b.x - (f.x + 9)) < 14 && Math.abs(b.y - (f.y + 7)) < 8) {
+        burst(s.sparks, f.x + 9, f.y + 7, 16, 58);
+        popup('+250', f.x, f.y);
+        f.x = VW + 60 + Math.random() * 140; hit = true; s.hits++;
+        shake(0.7);
+      }
+    }
+    if (hit) s.bullets.splice(i, 1);
+  }
+  for (let i = s.enemyBullets.length - 1; i >= 0; i--) {
+    const b = s.enemyBullets[i];
+    b.x -= 95 * dt;
+    rect(b.x - 4, b.y, 10, 1, rgba([255, 150, 130], 0.35));
+    rect(b.x, b.y, 4, 1, rgba(mix(mix(P.accent, [255, 160, 150], 0.5), P.sun, 0.3), 0.95));
+    if (b.x < -6) { s.enemyBullets.splice(i, 1); continue; }
+    if (Math.abs(b.x - 56) < 10 && Math.abs(b.y - (py + 7)) < 7) {
+      burst(s.sparks, b.x, b.y, 10, 44);
+      s.enemyBullets.splice(i, 1);
+      s.hurt = 0.5; shake(0.9);
+    }
+  }
+  stepBurst(s.sparks, dt, [
+    rgb(mix(P.sun, [255, 248, 225], 0.6)),
+    rgb(mix(P.accent, P.sun, 0.35)),
+    rgba(P.accent, 0.5),
+  ]);
+  if (s.hurt > 0) {
+    s.hurt -= dt;
+    g.globalAlpha = 0.18 * s.hurt;
+    g.fillStyle = rgb([220, 120, 110]);
+    g.fillRect(0, 0, VW, VH);
+    g.globalAlpha = 1;
+  }
+}
+
+// --- файтинг: двое, полоски здоровья, искры, нокдаун
+function buildDuel(r, P) {
+  return {
+    a: { x: 128, hp: 100, arm: 0, hurt: 0 },
+    b: { x: 196, hp: 100, arm: 0, hurt: 0 },
+    next: 0.8, turn: 1, ko: 0, koAt: 0, round: 1,
+    crowd: Array.from({ length: 30 }, () => ({ x: r() * VW, y: rndRange(r, 72, 84), s: rndRange(r, 2, 4), p: r() * 6 })),
+    sparks: [],
+    dust: particles(r, 20, { vx: [-3, 3], vy: [-6, -2], spanY: [110, 166], size: [1, 1] }),
+  };
+}
+function drawDuel(s, P, t, dt) {
+  // зал: тёмная стена, толпа силуэтами, яркий пол в пятне прожектора
+  bandGradient(0, 88, [mix(P.deep, P.sky[0], 0.3), mix(P.deep, P.sky[1], 0.22), mix(P.ink, P.sky[2], 0.14)]);
+  for (const c of s.crowd) {                       // толпа у стены
+    const up = Math.sin(t * 2.4 + c.p) > 0.5 ? 2 : 0;
+    rect(c.x, c.y - c.s * 2, c.s, c.s * 2, rgb(P.deep));
+    rect(c.x, c.y - c.s * 2 - c.s, c.s, c.s, rgb(P.deep));
+    if (up) rect(c.x - c.s, c.y - c.s * 2 - c.s, c.s, c.s, rgb(P.deep));
+  }
+  rect(0, 88, VW, VH - 88, rgb(mix(P.deep, P.sky[2], 0.3)));
+  rect(0, 88, VW, 1, rgba(mix(P.accent, P.sun, 0.3), 0.5));
+  // прожектор: бойцы стоят в свете
+  g.fillStyle = rgba(mix(P.sun, P.accent, 0.35), 0.07);
+  g.beginPath();
+  g.moveTo(VW / 2 - 7, 0); g.lineTo(VW / 2 + 7, 0);
+  g.lineTo(VW / 2 + 82, VH); g.lineTo(VW / 2 - 82, VH);
+  g.closePath(); g.fill();
+  glow(VW / 2, 136, 56, rgba(mix(P.sun, P.accent, 0.4), 0.08), 1);
+  drift(s.dust, { vx: [-2, 2], vy: [-5, -1], wobbleFreq: 1.6, wobble: 3, fade: () => 0.5 }, dt, rgba(P.sun, 0.18));
+
+  // бой: удары по очереди, с промахами и отскоком
+  if (!s.ko) {
+    s.next -= dt;
+    if (s.next <= 0) {
+      s.next = 0.75 + Math.random() * 0.7;
+      const atk = s.turn === 1 ? s.a : s.b;
+      const def = s.turn === 1 ? s.b : s.a;
+      const reach = Math.abs(atk.x - def.x) < 74;
+      atk.arm = 1;
+      if (reach) {
+        def.hp -= 6 + Math.random() * 9;
+        def.hurt = 0.4;
+        const hx = (atk.x + def.x) / 2 + (s.turn === 1 ? 16 : -16);
+        burst(s.sparks, hx, 118, 9, 44);
+        shake(0.6);
+        popup('HIT', hx - 8, 108);
+      }
+      if (def.hp <= 0) { s.ko = 1; s.koAt = t; popup('K.O.', 138, 92); shake(1.2); }
+      s.turn = -s.turn;
+    } else {
+      s.a.arm = Math.min(1, s.a.arm + dt * 5);
+      s.b.arm = Math.min(1, s.b.arm + dt * 5);
+    }
+    // лёгкая качка: бойцы сближаются и расходятся
+    s.a.x = 128 + Math.sin(t * 1.4) * 5;
+    s.b.x = 196 - Math.sin(t * 1.4 + 0.6) * 5;
+  } else if (t - s.koAt > 3.4) {                   // новый раунд
+    s.ko = 0; s.round++; s.a.hp = 100; s.b.hp = 100; s.next = 1;
+  }
+  // Боец собирается из частей: сначала тёмный контур, потом цвет.
+  // Без контура фигурки сливаются с фоном — на этом всё и ломалось.
+  const fighter = (f, face, body, skin, ko) => {
+    const baseY = 138;
+    const arm = f.arm * (ko ? 0 : 1);
+    const lean = ko ? 6 : 0;
+    const step = ko ? 0 : (Math.sin(t * 3 + f.x) > 0 ? 1 : 0);
+    const ex = f.x + face * (4 + arm * 14);
+    const parts = [
+      [f.x - 4, baseY - 23 + lean, 9, 15, body],               // торс
+      [f.x - 3, baseY - 31 + lean, 7, 7, skin],                // голова
+      [f.x - 4, baseY - 8, 4, 8 - step, body],                 // ноги
+      [f.x + 1, baseY - 8 + step, 4, 8 - step, body],
+      [Math.min(f.x, ex), baseY - 21, Math.abs(ex - f.x) + 4, 4, body],
+      [ex, baseY - 22, 5, 5, skin],
+    ];
+    rect(f.x - 8, baseY + 1, 16, 2, rgba(P.deep, 0.5));        // тень на полу
+    for (const q of parts) rect(q[0] - 1, q[1] - 1, q[2] + 2, q[3] + 2, rgb(P.deep));
+    for (const q of parts) rect(q[0], q[1], q[2], q[3], q[4]);
+    rect(f.x + face * 2, baseY - 29 + lean, 1, 1, rgb(P.deep));// глаз
+    if (f.hurt > 0) {
+      g.globalAlpha = f.hurt * 0.75;
+      rect(f.x - 5, baseY - 32, 11, 26, rgb([250, 220, 205]));
+      g.globalAlpha = 1;
+      f.hurt -= dt;
+    }
+  };
+  const skinA = rgb(mix(P.sun, [255, 226, 196], 0.5));
+  const skinB = rgb(mix(P.sun, P.accent, 0.2));
+  fighter(s.a, 1, rgb(mix(P.pale, P.accent, 0.3)), skinA, s.a.hp <= 0);
+  fighter(s.b, -1, rgb(mix(P.sky[2], P.accent, 0.45)), skinB, s.b.hp <= 0);
+  stepBurst(s.sparks, dt, [
+    rgb(mix(P.sun, [255, 245, 220], 0.6)), rgb(mix(P.accent, P.sun, 0.5)), rgba(P.glow, 0.55),
+  ]);
+  // канаты переднего плана: камера из зала
+  for (let y = 166; y < VH; y += 5) rect(0, y, VW, 1, rgba(P.deep, 0.75));
+
+  // классические полоски здоровья
+  rect(8, 8, 120, 7, rgba(P.deep, 0.9));
+  rect(9, 9, 118 * Math.max(0, s.a.hp) / 100, 5, rgba(mix(P.accent, [180, 240, 170], 0.5), 0.95));
+  rect(VW - 128, 8, 120, 7, rgba(P.deep, 0.9));
+  const wB = 118 * Math.max(0, s.b.hp) / 100;
+  rect(VW - 9 - wB, 9, wB, 5, rgba(mix(P.accent, [240, 170, 160], 0.5), 0.95));
+  text('YOU', 9, 18, rgba(P.sun, 0.85), 1);
+  text('RIVAL', VW - 9 - textWidth('RIVAL', 1), 18, rgba(P.sun, 0.85), 1);
+  text('ROUND ' + s.round, 138, 18, rgba(P.sun, 0.75), 1);
+}
+
+// --- дракон над замком: герой на скале, крылья, угли
+function buildDragon(r, P) {
+  return {
+    stars: Array.from({ length: 70 }, () => ({ x: r() * VW, y: r() * VH * 0.7, p: r() * 6, s: r() < 0.85 ? 1 : 2 })),
+    crag: Array.from({ length: 40 }, () => ({ x: r() * VW, h: rndRange(r, 6, 26), w: rndRange(r, 2, 6) })),
+    dragon: { x: 240, y: 54, dir: -1, p: r() * 6, breath: 0 },
+    hero: { x: 62, frame: 0 },
+    embers: particles(r, 26, { vx: [-6, 6], vy: [-14, -5], size: [1, 1] }),
+    moon: { x: rndRange(r, 40, 90), y: rndRange(r, 26, 44), r: rndRange(r, 12, 18) },
+    fire: [],
+  };
+}
+function drawDragon(s, P, t, dt) {
+  bandGradient(0, 130, [mix(P.deep, P.sky[0], 0.34), mix(P.deep, P.sky[1], 0.24), mix(P.ink, P.sky[2], 0.12)]);
+  for (const st of s.stars) {
+    const tw = 0.5 + 0.5 * Math.sin(t * 1.4 + st.p);
+    rect(st.x, st.y, st.s, st.s, rgba(P.sun, 0.8 * tw));
+  }
+  const m = s.moon;
+  glow(m.x, m.y, m.r * 3, rgba(P.sun, 0.13), 1);
+  for (let y = -m.r; y <= m.r; y++) {
+    const dx = Math.sqrt(Math.max(0, m.r * m.r - y * y)) | 0;
+    rect(m.x - dx, m.y + y, dx * 2, 1, rgb(mix(P.sun, [255, 250, 238], 0.7)));
+  }
+  silhouette(5, 130, 30, 0.009, rgb(mix(P.deep, P.sky[1], 0.22)), 2);
+  silhouette(17, 146, 20, 0.014, rgb(mix(P.deep, P.sky[1], 0.08)), 2);
+  // замок на дальнем утёсе
+  const cx = 244, cy = 118;
+  const stone = rgb(mix(P.deep, P.sky[1], 0.34));
+  rect(cx, cy - 26, 30, 26, stone);
+  for (let i = 0; i < 4; i++) rect(cx + 2 + i * 8, cy - 30, 4, 4, stone);
+  rect(cx + 12, cy - 44, 8, 18, stone);
+  rect(cx + 15, cy - 50, 3, 6, stone);
+  const litWin = rgba(mix(P.accent, [255, 210, 140], 0.55), 0.9);
+  rect(cx + 8, cy - 14, 3, 4, litWin);
+  rect(cx + 22, cy - 20, 3, 4, litWin);
+  if (Math.sin(t * 1.3) > -0.3) rect(cx + 16, cy - 40, 2, 3, litWin);
+
+  // дракон: тело светлее неба, крылья как парус на луне — иначе
+  // чёрное на чёрном не читается
+  const d = s.dragon;
+  d.x += d.dir * 7 * dt;
+  if (d.x < 120) d.dir = 1;
+  if (d.x > 300) d.dir = -1;
+  d.y = 54 + Math.sin(t * 0.7 + d.p) * 8;
+  const body = rgb(mix(P.accent, P.pale, 0.28));
+  const dark = rgb(mix(P.deep, P.accent, 0.22));
+  const flap = Math.sin(t * 3.4);
+  for (let side = -1; side <= 1; side += 2) {      // два крыла: дальнее темнее
+    const back = side < 0;
+    g.fillStyle = back
+      ? rgba(mix(P.deep, P.accent, 0.3), 0.85)
+      : rgba(mix(P.accent, P.sun, 0.4), 0.62);
+    g.beginPath();
+    g.moveTo(d.x, d.y + (back ? -2 : 0));
+    g.lineTo(d.x - d.dir * (16 + (back ? 5 : 0)), d.y - 15 - flap * 13);
+    g.lineTo(d.x - d.dir * (30 + (back ? 4 : 0)), d.y + 2 + flap * 7);
+    g.lineTo(d.x - d.dir * 10, d.y + 5);
+    g.closePath(); g.fill();
+    for (let k = 1; k <= 3; k++) {                 // «пальцы» крыла
+      g.fillStyle = back ? rgb(P.deep) : rgba(mix(P.deep, P.accent, 0.35), 0.75);
+      g.beginPath();
+      g.moveTo(d.x - d.dir * 2, d.y + 1);
+      g.lineTo(d.x - d.dir * (10 + k * 6), d.y - 12 - flap * (11 - k * 2) + k * 3);
+      g.lineTo(d.x - d.dir * (11 + k * 6), d.y - 9 - flap * (10 - k * 2) + k * 3);
+      g.closePath(); g.fill();
+    }
+  }
+  for (let i = -8; i <= 8; i++) {                  // тело: спина светлая, брюхо тёмное
+    const hh = Math.round(1 + (1 - (i * i) / 64) * 4);
+    rect(d.x + d.dir * i, d.y - hh, 1, hh + 1, body);
+    rect(d.x + d.dir * i, d.y + 1, 1, hh, dark);
+  }
+  for (let i = 1; i <= 20; i++) {                  // хвост волной
+    const k = i / 20;
+    const y = d.y + 2 + Math.sin(t * 2 + i * 0.35) * 3 * k;
+    rect(d.x - d.dir * (8 + i), y, 1, Math.max(1, Math.round(3 * (1 - k))), body);
+  }
+  rect(d.x - d.dir * 30, d.y + 2 + Math.sin(t * 2 + 7) * 3, 2, 2, body);
+  const nx = d.x + d.dir * 9, ny = d.y - 4;
+  for (let i = 0; i < 6; i++) rect(d.x + d.dir * (5 + i * 2), d.y - 4 - i * 0.6, 2, 3, body);   // шея
+  rect(nx, ny - 2, 7, 5, body);
+  rect(nx + d.dir * 1, ny - 4, 3, 2, rgb(mix(P.accent, P.sun, 0.5)));     // рог
+  rect(nx + d.dir * 4, ny - 1, 2, 2, rgb(mix([255, 210, 130], P.sun, 0.3)));
+  d.breath -= dt;
+  if (d.breath <= 0) { d.breath = 6 + Math.random() * 5; burst(s.fire, nx + d.dir * 6, ny + 1, 16, 34); }
+  if (d.breath < 0.9) glow(nx + d.dir * 6, ny + 1, 9, rgba([255, 170, 90], 0.3), 1);
+  stepBurst(s.fire, dt, [rgb(mix(P.sun, [255, 180, 100], 0.7)), rgb(mix(P.accent, [255, 140, 70], 0.55)), rgba([220, 110, 70], 0.45)]);
+
+  for (const c of s.crag) rect(c.x, 176 - c.h, c.w, c.h + 4, rgb(mix(P.deep, P.sky[1], 0.06)));
+  rect(0, 176, VW, VH - 176, rgb(P.deep));
+  s.hero.frame = Math.floor(t * 1.6) % 2;
+  sprite(s.hero.frame ? SPRITES.heroB : SPRITES.heroA, s.hero.x, 164,
+    { a: rgb(mix(P.pale, P.sun, 0.3)), b: rgb(mix(P.accent, P.deep, 0.4)), c: rgb(P.deep), d: rgb(mix(P.sun, P.pale, 0.4)) }, false);
+  drift(s.embers, { vx: [-4, 4], vy: [-16, -6], wobbleFreq: 2, wobble: 4, fade: (p) => 0.4 + 0.6 * Math.sin(NOW + p.p) }, dt,
+    () => rgba(mix(P.accent, [255, 170, 90], 0.6), 0.7));
+}
+
+// --- остров: море, лодка, пальмы, отражение
+function buildIsland(r, P) {
+  return {
+    waves: Array.from({ length: 30 }, (_, i) => ({ y: 103 + i * 3, len: rndRange(r, 8, 30), x: r() * VW, v: rndRange(r, 3, 10), a: rndRange(r, 0.16, 0.45) })),
+    palms: Array.from({ length: 3 }, (_, i) => ({ x: 92 + i * 15 + rndRange(r, -4, 4), h: rndRange(r, 26, 40), p: r() * 6, lean: rndRange(r, -3, 3) })),
+    boat: { x: -30, s: rndRange(r, 0.8, 1.2) },
+    far: { x: rndRange(r, 40, 120), s: rndRange(r, 0.5, 0.8) },
+    clouds: Array.from({ length: 4 }, () => ({ x: r() * VW, y: rndRange(r, 14, 52), w: rndRange(r, 30, 60), s: rndRange(r, 1, 3) })),
+    birds: Array.from({ length: 3 }, () => ({ x: r() * VW, y: rndRange(r, 34, 64), p: r() * 6, v: rndRange(r, 6, 12) })),
+    flies: particles(r, 16, { vx: [-4, 4], vy: [-3, 3], spanY: [130, 176], size: [1, 1] }),
+    sparkle: particles(r, 24, { vx: [-3, 3], vy: [-1, 1], spanY: [110, 174], size: [1, 1] }),
+    rocks: Array.from({ length: 7 }, (_, i) => ({ x: i * 46 + rndRange(r, -14, 14), w: rndRange(r, 20, 34), h: rndRange(r, 8, 16) })),
+  };
+}
+function palm(x, baseY, h, sway, trunk, leaf) {
+  const top = baseY - h;
+  const ct = rgb(trunk), cl = rgb(leaf);
+  for (let y = 0; y < h; y++) {                    // ствол с изгибом
+    const k = y / h;
+    rect(x + sway * k * k * 2, baseY - y, 2, 1, ct);
+  }
+  const tx = x + sway * 2, ty = top;
+  for (let a = 0; a < 6; a++) {                    // листья двумя пикселями
+    const ang = -0.25 - a * 0.5;
+    for (let l = 2; l < 9; l++) {
+      const px = tx + 1 + Math.cos(ang) * l * 1.15;
+      const py = ty + Math.sin(ang) * l * 0.75 + l * l * 0.045;
+      rect(px, py, 2, 2, cl);
+    }
+  }
+  rect(tx - 2, ty - 1, 5, 2, cl);
+  rect(tx + 1, ty + 1, 2, 2, rgb(mix(leaf, [70, 58, 36], 0.4)));
+}
+function drawIsland(s, P, t, dt) {
+  // небо: тёплая дымка у горизонта, иначе рассвет выходит серым
+  bandGradient(0, 103, [
+    mix(P.sky[0], P.accent, 0.28),
+    mix(P.sky[1], mix(P.accent, P.glow, 0.4), 0.32),
+    mix(P.sky[2], [255, 236, 200], 0.42),
+  ]);
+  for (const c of s.clouds) {                      // облака дизерингом
+    const x = ((c.x + t * c.s) % (VW + 90) + VW + 90) % (VW + 90) - 45;
+    ditherFill(x, c.y, c.w, 4, rgba(mix(P.sun, P.sky[2], 0.5), 0.5), 0);
+    ditherFill(x + 6, c.y - 4, c.w - 16, 4, rgba(mix(P.sun, P.sky[2], 0.4), 0.4), 1);
+  }
+  const sunX = 62, sunY = 76, sr = 17;
+  glow(sunX, sunY, 46, rgba(mix(P.accent, P.sun, 0.5), 0.16), 1);
+  for (let y = -sr; y <= sr; y++) {
+    const dx = Math.sqrt(Math.max(0, sr * sr - y * y)) | 0;
+    rect(sunX - dx, sunY + y, dx * 2, 1, rgb(mix(P.sun, [255, 224, 168], 0.5)));
+  }
+  silhouette(23, 103, 14, 0.010, rgb(mix(P.ink, P.sky[1], 0.5)), 2);
+  // море: заметно темнее неба, иначе горизонт пропадает
+  rect(0, 103, VW, VH - 103, rgb(mix(P.deep, P.sky[1], 0.34)));
+  for (let y = 103; y < VH; y += 4) {              // вода светлеет к горизонту
+    const k = 1 - (y - 103) / (VH - 103);
+    ditherFill(0, y, VW, 4, rgba(mix(P.sky[1], P.accent, 0.3), 0.1 * k), 0);
+  }
+  rect(0, 103, VW, 1, rgba(mix(P.sun, P.accent, 0.4), 0.35));
+  for (const w of s.waves) {
+    w.x += w.v * dt;
+    if (w.x > VW) w.x = -w.len;
+    rect(w.x, w.y, w.len, 1, rgba(mix(P.sun, P.accent, 0.35), w.a * 0.9));
+    rect(w.x + w.len * 0.4, w.y + 1, w.len * 0.4, 1, rgba(P.sun, w.a * 0.4));
+  }
+  // солнечная дорожка
+  for (let i = 0; i < 16; i++) {
+    const y = 104 + i * ((VH - 104) / 16);
+    const len = (5 + Math.random() * 24) * (1 - i / 18);
+    rect(sunX - len / 2, y, len, 1, rgba(mix(P.sun, P.accent, 0.25), 0.34 - i * 0.015));
+  }
+  // остров с пальмами: почти чёрный силуэт на свету
+  const isle = mix(P.deep, P.sky[1], 0.12);
+  silhouette(31, 116, 11, 0.03, isle, 1);
+  for (const p of s.palms) {
+    const sway = Math.sin(t * 0.9 + p.p) * 5 + p.lean;
+    palm(p.x, 116, p.h, sway, rgb(mix(P.deep, P.sky[1], 0.2)), rgb(mix(P.deep, P.accent, 0.28)));
+  }
+  silhouette(37, 118, 6, 0.05, rgb(mix(P.deep, P.sky[1], 0.06)), 1);
+  // дальняя лодка — для глубины
+  s.far.x += 3 * s.far.s * dt;
+  if (s.far.x > VW + 20) s.far.x = -20;
+  g.globalAlpha = 0.55;
+  sprite(SPRITES.boat, s.far.x, 96, { b: rgb(mix(P.deep, P.sky[1], 0.15)), d: rgba(P.sun, 0.7) }, false, s.far.s);
+  g.globalAlpha = 1;
+  // лодка с отражением
+  s.boat.x += 7 * s.boat.s * dt;
+  if (s.boat.x > VW + 30) s.boat.x = -30;
+  const by = 97 + Math.sin(t * 1.6) * 1.5;
+  g.globalAlpha = 0.22;
+  sprite(SPRITES.boat, s.boat.x, by + 15, { b: rgb(mix(P.deep, P.sky[1], 0.2)), d: rgba(P.sun, 0.7) }, false);
+  g.globalAlpha = 1;
+  sprite(SPRITES.boat, s.boat.x, by, {
+    b: rgb(mix(P.deep, P.accent, 0.22)), d: rgb(mix(P.pale, P.sun, 0.4)),
+  }, false);
+  rect(s.boat.x - 2, by + 13, 11, 1, rgba(P.sun, 0.16));
+  for (const b of s.birds) {
+    b.x += b.v * dt;
+    if (b.x > VW + 10) b.x = -10;
+    const flap = Math.sin(t * 5 + b.p) > 0;
+    sprite(flap ? SPRITES.birdA : SPRITES.birdB, b.x, b.y + Math.sin(t * 1.2 + b.p) * 3,
+      { a: rgba(mix(P.deep, P.sky[1], 0.2), 0.9) }, false);
+  }
+  drift(s.sparkle, { vx: [-3, 3], vy: [-1, 1], wobbleFreq: 2.2, wobble: 3, fade: (p) => 0.3 + 0.4 * Math.sin(NOW * 2 + p.p) }, dt, rgba(mix(P.sun, P.accent, 0.3), 0.5));
+  if (P.time === 'ночь') {
+    drift(s.flies, { vx: [-5, 5], vy: [-3, 3], wobbleFreq: 3, wobble: 6, fade: (p) => 0.4 + 0.6 * Math.abs(Math.sin(NOW * 1.6 + p.p)) }, dt,
+      () => rgba(mix(P.accent, [255, 240, 180], 0.5), 0.85));
+  }
+  // передний план: камни, чтобы кадр не был плоским
+  for (const rk of s.rocks) {
+    g.fillStyle = rgb(mix(P.deep, P.sky[1], 0.05));
+    g.beginPath();
+    g.moveTo(rk.x, VH);
+    g.lineTo(rk.x + rk.w * 0.15, VH - rk.h);
+    g.lineTo(rk.x + rk.w * 0.7, VH - rk.h * 0.6);
+    g.lineTo(rk.x + rk.w, VH);
+    g.closePath(); g.fill();
+  }
+}
+
 const SCENES = {
   platformer: { build: buildPlatformer, draw: drawPlatformer },
   rpg: { build: buildRpg, draw: drawRpg },
@@ -741,6 +1368,10 @@ const SCENES = {
   vapor: { build: buildVapor, draw: drawVapor },
   snow: { build: buildSnow, draw: drawSnow },
   abstract: { build: buildAbstract, draw: drawAbstract },
+  shooter: { build: buildShooter, draw: drawShooter },
+  duel: { build: buildDuel, draw: drawDuel },
+  dragon: { build: buildDragon, draw: drawDragon },
+  island: { build: buildIsland, draw: drawIsland },
 };
 
 // ---------------------------------------------------------------- названия
@@ -756,6 +1387,10 @@ const TITLE_B = {
   vapor: ['MIRAGE', 'CASSETTE', 'HORIZON', 'PALM', 'HIGHWAY'],
   snow: ['CABIN', 'FROST', 'PINES', 'EMBER', 'PASS'],
   abstract: ['FORM', 'PULSE', 'GEOMETRY', 'SILENCE', 'ANGLE'],
+  shooter: ['PATROL', 'SQUADRON', 'VOLLEY', 'ORBITAL', 'STRIKE'],
+  duel: ['BOUT', 'ARENA', 'REMATCH', 'RIVALS', 'ROUND TWO'],
+  dragon: ['WYRM', 'KEEP', 'SPIRE', 'BANNER', 'SIEGE'],
+  island: ['SHORE', 'LAGOON', 'HARBOR', 'PALMS', 'CROSSING'],
 };
 const TITLE_C = ['', ' II', ' III', ' - DEMO', ' - CHAPTER ONE', ' [1994]', ' - REMASTERED', ' +'];
 function makeTitle(r, genre) {
@@ -766,25 +1401,25 @@ function makeTitle(r, genre) {
 // Настроение радио -> жанр. Если музыки нет, жанр берётся по кругу.
 const MOOD_GENRE = {
   dusty: ['platformer', 'rpg', 'snow'],
-  jazzhop: ['rpg', 'platformer', 'vapor'],
-  chillhop: ['platformer', 'underwater', 'vapor'],
+  jazzhop: ['rpg', 'platformer', 'duel'],
+  chillhop: ['platformer', 'underwater', 'island'],
   midnight: ['cyber', 'space', 'dungeon'],
-  ambient: ['space', 'underwater', 'abstract'],
+  ambient: ['space', 'underwater', 'island'],
   experimental: ['abstract', 'cyber', 'underwater'],
   'lofi-house': ['cyber', 'vapor', 'rpg'],
-  soul: ['rpg', 'cyber', 'vapor'],
-  bossa: ['vapor', 'underwater', 'platformer'],
+  soul: ['rpg', 'duel', 'cyber'],
+  bossa: ['island', 'vapor', 'underwater'],
   piano: ['snow', 'rpg', 'abstract'],
-  dark: ['dungeon', 'cyber', 'space'],
-  trap: ['cyber', 'dungeon', 'abstract'],
+  dark: ['dungeon', 'dragon', 'cyber'],
+  trap: ['shooter', 'cyber', 'dungeon'],
   dub: ['underwater', 'cyber', 'dungeon'],
-  vapor: ['vapor', 'abstract', 'space'],
-  chip: ['platformer', 'vapor', 'space'],
-  guitar: ['vapor', 'platformer', 'snow'],
-  strings: ['snow', 'dungeon', 'abstract'],
-  vocal: ['abstract', 'cyber', 'vapor'],
+  vapor: ['vapor', 'shooter', 'space'],
+  chip: ['shooter', 'platformer', 'vapor'],
+  guitar: ['vapor', 'platformer', 'dragon'],
+  strings: ['dragon', 'snow', 'dungeon'],
+  vocal: ['duel', 'abstract', 'cyber'],
   musicbox: ['rpg', 'snow', 'abstract'],
-  bedroom: ['rpg', 'platformer', 'cyber'],
+  bedroom: ['rpg', 'island', 'platformer'],
 };
 
 const director = {
@@ -792,6 +1427,7 @@ const director = {
   scene: null,
   palette: null,
   title: '',
+  objective: '',
   seed: 0,
   startedAt: 0,
   track: -1,
@@ -799,7 +1435,10 @@ const director = {
   nextAuto: 0,
   fade: 1,          // 1 — чёрный экран, дальше проявляется
   shot: 0,          // счётчик «взятых» кадров для счётчика очков
+  pops: [],         // всплывающие очки вроде «+100»
+  shake: 0,         // тряска камеры от попаданий
 };
+let NOW = 0;        // время сцены: им живут частицы и всплывающие очки
 
 function newScene(genre, seed, now) {
   const r = mulberry32(seed);
@@ -808,6 +1447,7 @@ function newScene(genre, seed, now) {
   director.palette = makePalette(r, genre);
   director.scene = SCENES[genre].build(r, director.palette);
   director.title = makeTitle(r, genre);
+  director.objective = GENRES[genre].objective;
   director.startedAt = now;
   director.fade = 1;
   director.shot = 0;
@@ -835,15 +1475,34 @@ function musicState() {
 // ---------------------------------------------------------------- интерфейс
 function drawHud(P, t) {
   const inScene = t - director.startedAt;
+  const soft = rgba(mix(P.sun, P.accent, 0.4), 0.9);
+
+  // цель уровня: появляется после титров, потом сама уходит
+  if (inScene > 6.5 && inScene < 19) {
+    const k = Math.min(1, (inScene - 6.5) / 0.6) * Math.min(1, (19 - inScene) / 2);
+    g.globalAlpha = Math.max(0, Math.min(1, k));
+    textCentered(director.objective, VH - 24, rgba(P.sun, 0.72), 1);
+    g.globalAlpha = 1;
+  }
+
+  // всплывающие очки: поднимаются и гаснут
+  for (const p of director.pops) {
+    const age = NOW - p.born;
+    if (age > 1.5) continue;
+    const k = 1 - age / 1.5;
+    g.globalAlpha = k;
+    text(p.text, p.x, (p.y - age * 11) | 0, rgba(mix(P.sun, P.accent, 0.35), 0.95), 1);
+    g.globalAlpha = 1;
+  }
+  if (director.pops.length) director.pops = director.pops.filter((p) => NOW - p.born <= 1.5);
+
   if (inScene < 6.5) return;                      // во время титров HUD не мешает
   const ink = rgba(P.ink, 0.85);
-  const soft = rgba(mix(P.sun, P.accent, 0.4), 0.9);
   // очки вверху слева, растут как в настоящей игре
-  text('SCORE ' + String(director.score).padStart(6, '0'), 6, 6, ink, 1);
+  text('SCORE ' + String(Math.floor(director.score)).padStart(6, '0'), 6, 6, ink, 1);
   text('LV ' + String(1 + (director.track & 0xff) % 9).padStart(2, '0'), 6, 15, soft, 1);
   // «здоровье» справа
-  const hp = 3;
-  for (let i = 0; i < hp; i++) {
+  for (let i = 0; i < 3; i++) {
     const x = VW - 8 - i * 8;
     rect(x, 6, 5, 4, rgba(P.accent, 0.85));
     rect(x + 1, 7, 3, 2, rgba(P.ink, 0.7));
@@ -893,6 +1552,16 @@ function drawFrameOverlay(P, t) {
 }
 
 // ---------------------------------------------------------------- цикл
+// Служебные переключатели для просмотра. На эфир не влияют: в бою они не заданы.
+//   ?switch=12   сменить сцену через 12 с, не дожидаясь нового трека
+//   ?genre=cyber  показать конкретный жанр
+const params = (typeof location !== 'undefined' && location.search)
+  ? new URLSearchParams(location.search) : null;
+const SWITCH_SEC = Number((globalThis.SCENE_SWITCH_SEC || 0)
+  || (params && params.get('switch')) || 0);
+const FORCED_GENRE = globalThis.SCENE_FORCE || (params && params.get('genre')) || null;
+const AUTO_SEC = SWITCH_SEC > 0 ? SWITCH_SEC : 75;
+
 let last = 0;
 function frame(now) {
   let t = now / 1000;
@@ -900,11 +1569,15 @@ function frame(now) {
   last = t;
 
   const music = musicState();
-  const track = music && typeof music.track === 'number' ? music.track : Math.floor(t / 75);
+  const byMusic = !SWITCH_SEC && music && typeof music.track === 'number';
+  const track = byMusic ? music.track : Math.floor(t / AUTO_SEC);
   if (track !== director.track || !director.scene) {
     const mood = music && music.mood ? music.mood : null;
     const seed = ((track + 1) * 2654435761 + Math.floor(t)) >>> 0;
-    newScene(chooseGenre(track, mood, t), seed, t);
+    const genre = (FORCED_GENRE && SCENES[FORCED_GENRE])
+      ? FORCED_GENRE
+      : chooseGenre(track, mood, t);
+    newScene(genre, seed, t);
     director.track = track;
   }
 
@@ -912,7 +1585,18 @@ function frame(now) {
   director.fade = Math.max(0, director.fade - dt * 1.4);
 
   const P = director.palette;
-  SCENES[director.genre].draw(director.scene, P, t - director.startedAt);
+  NOW = t;
+  // тряска камеры: сцены заявляют её при попаданиях
+  let sx = 0, sy = 0;
+  if (director.shake > 0) {
+    director.shake = Math.max(0, director.shake - dt * 2.4);
+    sx = (Math.random() - 0.5) * director.shake * 3.5;
+    sy = (Math.random() - 0.5) * director.shake * 2.5;
+  }
+  g.save();
+  g.translate(Math.round(sx), Math.round(sy));
+  SCENES[director.genre].draw(director.scene, P, t - director.startedAt, dt);
+  g.restore();
   drawFrameOverlay(P, t);
   drawHud(P, t);
   drawTitleCard(P, t);
