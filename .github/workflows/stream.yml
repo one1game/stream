@@ -11,6 +11,10 @@ on:
         description: "light — 960x540, normal — 1280x720, high — 1920x1080 (на бесплатном раннере может не удержать 30 fps)"
         required: false
         default: "normal"
+      video:
+        description: "Что показывать: newvideo.html — улица (живёт по музыке), game_video.html — генератор игр"
+        required: false
+        default: "newvideo.html"
 
 permissions:
   contents: read
@@ -60,4 +64,5 @@ jobs:
           python scripts/start_stream.py \
             --minutes "${{ inputs.minutes }}" \
             --quality "${{ inputs.quality }}" \
+            --video "${{ inputs.video }}" \
             --started-at "${JOB_STARTED_AT:-}"

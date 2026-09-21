@@ -64,8 +64,19 @@ PLAYER = """<!DOCTYPE html>
 """
 
 
-def hls_command(src: tuple[int, int, int], video_port: int, audio_port: int) -> list[str]:
+def hls_command(src: tuple[int, int, int], out: tuple[int, int, int],
+                video_port: int, audio_port: int) -> list[str]:
     width, height, fps = src
+    out_w, out_h, out_fps = out
+    filters = []
+    if (width, height) != (out_w, out_h):
+        # Тот же сглаженный подъём, что и в эфире: иначе предпросмотр показывал
+        # бы крупный пиксель там, где на YouTube картинка мягкая.
+        filters.append(f"scale={out_w}:{out_h}:flags=bicubic")
+    # Источник рисует реже эфира — сначала добираем кадры до эфирной частоты,
+    # потом зерно, чтобы дублированные кадры друг от друга отличались.
+    filters.append(f"fps={out_fps}")
+    filters.append("noise=alls=5:allf=t")
     return [
         FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "warning",
         "-f", "rawvideo", "-pix_fmt", "rgba",
@@ -74,10 +85,10 @@ def hls_command(src: tuple[int, int, int], video_port: int, audio_port: int) -> 
         "-f", "f32le", "-ar", "44100", "-ac", "2",
         "-i", f"tcp://127.0.0.1:{audio_port}",
         "-map", "0:v", "-map", "1:a",
-        "-vf", "noise=alls=5:allf=t",
+        "-vf", ",".join(filters),
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
         "-profile:v", "high", "-pix_fmt", "yuv420p",
-        "-g", str(fps * 2), "-keyint_min", str(fps * 2), "-sc_threshold", "0",
+        "-g", str(out_fps * 2), "-keyint_min", str(out_fps * 2), "-sc_threshold", "0",
         "-b:v", ss.VIDEO_BITRATE, "-maxrate", ss.VIDEO_BITRATE, "-bufsize", "6000k",
         "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
         "-f", "hls", "-hls_time", "2", "-hls_list_size", "4",
@@ -107,7 +118,9 @@ def main() -> int:
     parser.add_argument("--minutes", type=float, default=180, help="длительность показа")
     parser.add_argument("--rehearse", type=float, default=0,
                         help="менять сцену каждые N секунд, не дожидаясь трека")
-    parser.add_argument("--genre", default="", help="зафиксировать один жанр")
+    parser.add_argument("--genre", default="", help="зафиксировать один слой или жанр")
+    parser.add_argument("--video", default=ss.VIDEO_FILE,
+                        help="что показывать: newvideo.html — улица, game_video.html — игры")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -117,31 +130,32 @@ def main() -> int:
         stale.unlink()
     (OUT_DIR / "index.html").write_text(PLAYER, encoding="utf-8")
 
-    src, _ = ss.QUALITY[args.quality]
+    src, out = ss.sizes(args.video, args.quality)
     seed = args.seed or int(time.time()) & 0xffffffff
 
-    command = ss.source_command(seed, src)
+    command = ss.source_command(seed, src, args.video)
     if args.rehearse:
         command.append(f"--rehearse={args.rehearse}")
     if args.genre:
         command.append(f"--genre={args.genre}")
 
-    print(f"Источник {src[0]}x{src[1]}@{src[2]}, режим {args.quality}.", flush=True)
+    print(f"Источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}, "
+          f"режим {args.quality}.", flush=True)
     source = subprocess.Popen(
         command, cwd=str(ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace", bufsize=1,
     )
 
-    ports: dict[str, tuple[int, int]] = {}
+    ports: dict[str, tuple[int, int, int]] = {}
     ready = threading.Event()
 
     def pump() -> None:
         for line in source.stderr:
             line = line.rstrip()
             if line.startswith("ready "):
-                a, b = line.split()[1:3]
-                ports["p"] = (int(a), int(b))
+                a, b, fps = line.split()[1:4]
+                ports["p"] = (int(a), int(b), int(fps))
                 ready.set()
             elif line:
                 print(f"[source] {line}", flush=True)
@@ -152,8 +166,10 @@ def main() -> int:
         print("Источник не поднялся.", file=sys.stderr)
         return 1
 
-    video_port, audio_port = ports["p"]
-    encoder = subprocess.Popen(hls_command(src, video_port, audio_port), cwd=str(ROOT))
+    video_port, audio_port, src_fps = ports["p"]
+    encoder = subprocess.Popen(
+        hls_command((src[0], src[1], src_fps), out, video_port, audio_port),
+        cwd=str(ROOT))
 
     server = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
     server.daemon_threads = True

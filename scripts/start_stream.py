@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Гонит процедурный эфир на YouTube по постоянному stream key.
 
-Картинку и звук отдаёт scripts/stream_source.mjs — он исполняет reneratorvideo.html
-на Skia-канвасе и радио-движок из radio/ прямо в Node, без браузера. Этот скрипт
-только связывает источник с FFmpeg и следит за дедлайном.
+Картинку и звук отдаёт scripts/stream_source.mjs — он исполняет сцену
+(newvideo.html — улица, либо game_video.html — игры) на Skia-канвасе и
+радио-движок из radio/ прямо в Node, без браузера. Этот скрипт только
+связывает источник с FFmpeg и следит за дедлайном.
 
     python start_stream.py --minutes 348
 """
@@ -26,19 +27,44 @@ RTMP_BASE = "rtmp://a.rtmp.youtube.com/live2"
 SOURCE = Path(__file__).with_name("stream_source.mjs")
 ROOT = Path(__file__).resolve().parent.parent
 
-# Пресеты качества.
+# Пресеты эфира: что получает YouTube.
 #
-# Генератор игр рисует мир в маленьком канвасе 320x180 и растягивает его целым
-# числом без сглаживания. Замер: 5.2 мс на кадр в 1280x720, то есть потолок
-# 192 fps против 30 нужных. Поэтому кадры рисуются сразу в эфирном разрешении,
-# без растяжки и добора кадров — в отличие от пейзажа, который стоил 62 мс и
-# требовал понижать частоту. Разрешения кратны 4x, чтобы пиксель остался целым.
+# Частота источника здесь только пожелание: сколько кадров тянет машина,
+# источник измеряет сам при запуске (см. калибровку в stream_source.mjs) и
+# называет в строке ready. FFmpeg добирает кадры до эфирных 30 и кладёт своё
+# зерно на каждый.
 QUALITY = {
-    "light":  ((960, 540, 30), (960, 540, 30)),
-    "normal": ((1280, 720, 30), (1280, 720, 30)),
-    "high":   ((1920, 1080, 30), (1920, 1080, 30)),
+    "light":  (960, 540, 30),
+    "normal": (1280, 720, 30),
+    "high":   (1920, 1080, 30),
 }
+
+# Доля эфирного разрешения, в которой рисует источник.
+#
+# Улица — это сотни операций рисования на кадр, и Skia в этом билде тратит на
+# чтение пикселей больше, чем на само рисование: кадр 960x540 стоит вдвое
+# дешевле кадра 1280x720. Поэтому источник рисует 960x540, а FFmpeg тянет
+# картинку до эфирных 1280x720 сглаженно и кладёт зерно — выходит мягко и
+# плёночно, зато движения заметно больше. Генератору игр растяжка вредна: она
+# мылит пиксель-арт, поэтому он рисует ровно в эфирном разрешении.
+RENDER_SCALE = {"newvideo.html": 0.75, "game_video.html": 1.0}
+
+
+def sizes(video: str, quality: str) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Что рисует источник и что уходит в эфир."""
+    out = QUALITY[quality]
+    scale = RENDER_SCALE.get(video, 1.0)
+    src = (round(out[0] * scale) & ~1, round(out[1] * scale) & ~1, out[2])
+    return src, out
+
+
 VIDEO_BITRATE = "3000k"
+
+# Что показывать в эфире. Сейчас это улица (newvideo.html): она живёт по
+# музыке — смена трека пересобирает квартал, час суток, сезон и погоду.
+# Генератор игр (game_video.html) остался в репозитории и включается сменой
+# этого значения или флагом --video.
+VIDEO_FILE = "newvideo.html"
 
 # GitHub-hosted job живёт максимум 360 минут, выше не поднять.
 MAX_MINUTES = 350
@@ -46,6 +72,10 @@ MAX_MINUTES = 350
 # RTMP тоже занимают время, и в 360 минут они входить не должны.
 JOB_LIMIT_MINUTES = 355
 MAX_RETRIES = 5
+# Попытка, прожившая столько, считается удачной: счётчик падений обнуляется.
+# На пятичасовом эфире редкие обрывы в сумме иначе выбирают весь лимит
+# повторов, и поток сдаётся задолго до конца.
+RETRY_RESET_SEC = 600
 READY_TIMEOUT = 60
 
 # Сюда складываем запущенные процессы, чтобы обработчик сигнала мог их
@@ -58,12 +88,14 @@ def log(message: str) -> None:
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {message}", flush=True)
 
 
-def source_command(seed: int, src: tuple[int, int, int]) -> list[str]:
+def source_command(seed: int, src: tuple[int, int, int],
+                   video: str = VIDEO_FILE) -> list[str]:
     width, height, fps = src
     return [
         "node", str(SOURCE),
         f"--width={width}", f"--height={height}", f"--fps={fps}",
         f"--seed={seed}",
+        f"--video={video}",
     ]
 
 
@@ -73,16 +105,19 @@ def ffmpeg_command(
 ) -> list[str]:
     src_w, src_h, src_fps = src
     out_w, out_h, out_fps = out
-    # Растяжка нужна только если источник мельче эфира. Масштабируем соседним
-    # пикселем, а не сглаживанием: иначе пиксель-арт превращается в мыло.
+    # Растяжка нужна, когда источник рисует мельче эфира. Тянем сглаженно:
+    # уличная картинка мягкая и зернистая, соседний пиксель её только изломает.
     filters = []
     if (src_w, src_h) != (out_w, out_h):
-        filters.append(f"scale={out_w}:{out_h}:flags=neighbor")
-    # Плёночное зерно поверх картинки — общий лофи-признак, и делает это
-    # FFmpeg заметно дешевле, чем рисование зерна по пикселям в канвасе.
+        filters.append(f"scale={out_w}:{out_h}:flags=bicubic")
+    # Источник рисует реже эфира (см. калибровку в stream_source.mjs), поэтому
+    # сначала добираем кадры до эфирной частоты, и только потом кладём зерно:
+    # тогда дублированные кадры отличаются зерном друг от друга и движение
+    # остаётся живым, а не залипает одной картинкой.
+    filters.append(f"fps={out_fps}")
     filters.append("noise=alls=5:allf=t")
     return [
-        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "info",
+        "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info",
         # Не даём FFmpeg виснуть вечно на RTMP/tcp: через 20 с без I/O он
         # сам упадёт и оставит в логе причину, а не молча зависнет.
         "-rw_timeout", "20000000",
@@ -108,22 +143,27 @@ def ffmpeg_command(
     ]
 
 
-def start_source(seed: int, src: tuple[int, int, int]) -> tuple[subprocess.Popen, int, int]:
-    """Поднимает источник и ждёт строку `ready <порт видео> <порт звука>`."""
+def start_source(seed: int, src: tuple[int, int, int],
+                 video: str = VIDEO_FILE) -> tuple[subprocess.Popen, int, int, int]:
+    """Поднимает источник и ждёт строку `ready <порт видео> <порт звука> <fps>`.
+
+    Частоту источник называет сам: он измеряет, сколько кадров тянет машина,
+    и эфир подстраивается под неё — иначе видео отстало бы от звука.
+    """
     process = subprocess.Popen(
-        source_command(seed, src), cwd=str(ROOT),
+        source_command(seed, src, video), cwd=str(ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         encoding="utf-8", errors="replace", bufsize=1,
     )
     ready = threading.Event()
-    found: dict[str, tuple[int, int]] = {}
+    found: dict[str, tuple[int, int, int]] = {}
 
     def pump() -> None:
         for line in process.stderr:
             line = line.rstrip()
             if line.startswith("ready "):
-                video_port, audio_port = line.split()[1:3]
-                found["ports"] = (int(video_port), int(audio_port))
+                video_port, audio_port, fps = line.split()[1:4]
+                found["ports"] = (int(video_port), int(audio_port), int(fps))
                 ready.set()
             elif line:
                 print(f"[source] {line}", flush=True)
@@ -138,10 +178,14 @@ def start_source(seed: int, src: tuple[int, int, int]) -> tuple[subprocess.Popen
 def attempt(
     stream_key: str, seconds: int, seed: int,
     src: tuple[int, int, int], out: tuple[int, int, int],
+    video: str = VIDEO_FILE,
 ) -> int:
-    source, video_port, audio_port = start_source(seed, src)
-    log(f"Источник готов, порты {video_port}/{audio_port}. "
-        f"Запускаю FFmpeg на {seconds // 60} мин.")
+    source, video_port, audio_port, src_fps = start_source(seed, src, video)
+    # Источник нарисовал первые кадры и сказал, сколько тянет: с этой частотой
+    # FFmpeg и читает его поток.
+    src = (src[0], src[1], src_fps)
+    log(f"Источник готов, порты {video_port}/{audio_port}, "
+        f"кадр {src_fps} fps. Запускаю FFmpeg на {seconds // 60} мин.")
     encoder = subprocess.Popen(
         ffmpeg_command(stream_key, seconds, video_port, audio_port, src, out),
         stdin=subprocess.DEVNULL, cwd=str(ROOT),
@@ -179,6 +223,7 @@ def attempt(
 def run(
     stream_key: str, deadline: float,
     src: tuple[int, int, int], out: tuple[int, int, int],
+    video: str = VIDEO_FILE,
 ) -> bool:
     tries = 0
     while not stopping.is_set():
@@ -189,16 +234,25 @@ def run(
         if tries > MAX_RETRIES:
             log(f"Поток падал {MAX_RETRIES} раз подряд — сдаёмся.")
             return False
+        began = time.time()
         try:
-            code = attempt(stream_key, remaining, random.randrange(1 << 31), src, out)
+            code = attempt(stream_key, remaining, random.randrange(1 << 31),
+                           src, out, video)
         except RuntimeError as error:
             log(f"{error}. Пробую ещё раз.")
             time.sleep(5)
             continue
-        if code == 0:
+        ended = time.time()
+        if ended - began >= RETRY_RESET_SEC:
+            tries = 0
+        # Ноль значит «FFmpeg дожил до -t», но ровно так же он выходит, когда
+        # YouTube закрыл приём. Разница только во времени: дошли до дедлайна —
+        # эфир окончен, вышли раньше — это обрыв, и его надо переподключить,
+        # иначе пятичасовой эфир тихо закончится через десять минут.
+        if code == 0 and ended >= deadline - 60:
             log("FFmpeg завершился штатно (достигнут дедлайн).")
             return True
-        log(f"FFmpeg упал с кодом {code}, переподключаюсь.")
+        log(f"FFmpeg завершился на {ended - began:.0f} с (код {code}), переподключаюсь.")
         time.sleep(5)
     return True
 
@@ -224,6 +278,10 @@ def main() -> int:
         "--started-at", default=os.environ.get("JOB_STARTED_AT", ""),
         help="epoch-время старта job'а: по нему считается жёсткий предел в 355 мин",
     )
+    parser.add_argument(
+        "--video", default=os.environ.get("STREAM_VIDEO", VIDEO_FILE),
+        help="что показывать: newvideo.html — улица, game_video.html — игры",
+    )
     args = parser.parse_args()
 
     if not args.key:
@@ -231,7 +289,7 @@ def main() -> int:
     if not re.fullmatch(r"[\w-]{8,}", args.key):
         sys.exit("Stream key выглядит битым: ожидаю 5 групп по 4 символа.")
 
-    src, out = QUALITY[args.quality]
+    src, out = sizes(args.video, args.quality)
     minutes = max(1, min(args.minutes, MAX_MINUTES))
     # Если GitHub отменяет job, приходит SIGTERM: закрываем RTMP сами и
     # оставляем в логе причину, вместо того чтобы оборвать соединение насильно.
@@ -243,7 +301,8 @@ def main() -> int:
     # Маскируем ключ в логах Actions на случай, если он куда-то попадёт.
     print(f"::add-mask::{args.key}", flush=True)
     log(f"Эфир на {minutes} мин. Режим {args.quality}: "
-        f"источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}.")
+        f"источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}, "
+        f"картинка {args.video}.")
 
     started = time.time()
     if args.started_at:
@@ -258,7 +317,7 @@ def main() -> int:
         "После этого FFmpeg закроет RTMP, и YouTube завершит трансляцию сам, "
         "если в Studio включён автостоп.")
 
-    ok = run(args.key, deadline, src, out)
+    ok = run(args.key, deadline, src, out, args.video)
     log("RTMP закрыт. Трансляция на YouTube завершается по автостопу.")
     return 0 if ok else 1
 

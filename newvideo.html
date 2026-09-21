@@ -1,0 +1,2612 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>КАМ 03 — УЛИЦА — ПРЯМОЙ ЭФИР</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+'use strict';
+const c=document.getElementById('c');
+const frameCtx=c.getContext('2d',{alpha:false});
+// Тот холст, в который сейчас идёт рисование. Пока печётся слой, сюда
+// подставляется холст слоя — рисующие функции о подмене не знают.
+let x=frameCtx;
+// Размер кадра берём у окна: в эфире его задаёт источник (960x540, 1280x720
+// или 1920x1080), поэтому улица не привязана к одному разрешению.
+const W=(typeof window!=='undefined'&&window.innerWidth)||1280;
+const H=(typeof window!=='undefined'&&window.innerHeight)||720;
+const TAU=Math.PI*2;
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+const coin=()=>Math.random()<0.5;
+
+// ===== ЗЕРНО УЛИЦЫ =====
+// Улица собирается из зерна: одно зерно — одна улица (дома, деревья, фонари,
+// толпа, погода, час суток). Смена трека радио пересобирает её целиком —
+// это и есть связь музыки и картинки: слой задаёт характер, зерно даёт новый
+// вид. За прогон в пять часов улица меняется сотню раз и не повторяется.
+function mulberry32(a){
+  return function(){
+    a|=0;a=a+0x6D2B79F5|0;
+    let k=Math.imul(a^a>>>15,1|a);
+    k=k+Math.imul(k^k>>>7,61|k)^k;
+    return ((k^k>>>14)>>>0)/4294967296;
+  };
+}
+let WORLD=mulberry32(0x9e3779b9);
+const wrnd=(a,b)=>a+WORLD()*(b-a);
+const wcoin=()=>WORLD()<0.5;
+const wpick=(list)=>list[Math.min(list.length-1,WORLD()*list.length|0)];
+
+const BRAND={name:'ONE1GAME',url:'one1game.live'};
+const SPEED={carSlow:60,carFast:160,personSlow:40,personNormal:70,personFast:110,personRun:160,emergency:240,biker:320,cleaner:25};
+
+// ===== АРХИВНАЯ ЗАПИСЬ =====
+// Эфир выдаётся за запись из архива: у него своя дата, и месяц обязан совпадать
+// со временем года на картинке — сцену собирает зерно, сезон оно выбирает само.
+// Названия композиций собираются из двух слов: повторы редки, а плашка живая.
+const SEASON_MONTHS={winter:[12,1,2],spring:[3,4,5],summer:[6,7,8],autumn:[9,10,11]};
+const COMP_A=['DUSTY','MIDNIGHT','SLOW','RAINY','PAPER','VELVET','FOGGY','OLD','QUIET','NEON','COLD','AMBER','LATE','LOW','SOFT','GREY'];
+const COMP_B=['TAPE','LOOP','SIGNAL','WINDOW','STREET','RECORD','ROOM','TRAIN','LAMP','HARBOR','LETTER','MORNING','CHANNEL','CASSETTE','PIANO','CLOUD','STATION','CORNER'];
+let archive={year:2026,month:1,day:1};
+let compName='';
+
+// ===== ПРОФИЛЬ УЛИЦЫ ПО СЛОЮ РАДИО =====
+// Слой музыки задаёт характер улицы: час суток, сезон, плотность машин и
+// людей и «настроение» — оно же фильтр для событий (у каждого события есть
+// minMood/maxMood). Ночные слои дают пустую тёмную улицу, живые — людную и
+// ясную. Темп трека задаёт скорость жизни: быстрее музыка — бодрее улица.
+//   hour: 0 — глубокая ночь, 0.25 — рассвет, 0.5 — полдень, 0.75 — закат
+const STREETS={
+  dusty:       {hour:[0.30,0.55], mood:[0.42,0.56], traffic:1.00, crowd:1.00, season:['summer','autumn']},
+  jazzhop:     {hour:[0.45,0.68], mood:[0.52,0.68], traffic:1.00, crowd:1.15, season:['summer','autumn']},
+  chillhop:    {hour:[0.32,0.60], mood:[0.45,0.60], traffic:0.90, crowd:0.95, season:['summer','spring']},
+  midnight:    {hour:[0.86,1.04], mood:[0.15,0.28], traffic:0.50, crowd:0.45, season:['autumn','winter']},
+  ambient:     {hour:[0.84,1.06], mood:[0.08,0.22], traffic:0.40, crowd:0.35, season:['winter','autumn']},
+  experimental:{hour:[0.36,0.64], mood:[0.45,0.62], traffic:1.05, crowd:0.90, season:['autumn','summer']},
+  'lofi-house':{hour:[0.50,0.76], mood:[0.60,0.78], traffic:1.30, crowd:1.20, season:['summer','spring']},
+  soul:        {hour:[0.44,0.70], mood:[0.52,0.68], traffic:1.00, crowd:1.10, season:['summer','autumn']},
+  bossa:       {hour:[0.34,0.64], mood:[0.60,0.78], traffic:1.10, crowd:1.20, season:['summer','spring']},
+  piano:       {hour:[0.24,0.52], mood:[0.32,0.48], traffic:0.65, crowd:0.70, season:['autumn','winter']},
+  dark:        {hour:[0.88,1.06], mood:[0.05,0.18], traffic:0.35, crowd:0.30, season:['winter','autumn']},
+  trap:        {hour:[0.80,1.02], mood:[0.28,0.42], traffic:0.95, crowd:0.70, season:['autumn','winter']},
+  dub:         {hour:[0.84,1.04], mood:[0.18,0.32], traffic:0.55, crowd:0.45, season:['autumn','summer']},
+  vapor:       {hour:[0.68,0.80], mood:[0.55,0.72], traffic:0.90, crowd:0.85, season:['summer','spring']},
+  chip:        {hour:[0.32,0.62], mood:[0.62,0.80], traffic:1.20, crowd:1.10, season:['summer','spring']},
+  guitar:      {hour:[0.34,0.62], mood:[0.48,0.62], traffic:0.80, crowd:0.95, season:['spring','summer']},
+  strings:     {hour:[0.20,0.46], mood:[0.28,0.42], traffic:0.60, crowd:0.60, season:['autumn','winter']},
+  vocal:       {hour:[0.44,0.70], mood:[0.50,0.66], traffic:1.00, crowd:1.05, season:['autumn','summer']},
+  musicbox:    {hour:[0.14,0.40], mood:[0.38,0.55], traffic:0.60, crowd:0.70, season:['winter','spring']},
+  bedroom:     {hour:[0.38,0.66], mood:[0.50,0.68], traffic:0.90, crowd:1.00, season:['spring','summer']},
+};
+const STREET_FALLBACK={hour:[0.30,0.62], mood:[0.45,0.62], traffic:1.00, crowd:1.00, season:['summer','autumn']};
+
+// Живое состояние улицы: обновляется на каждом треке.
+let traffic=1,        // множитель плотности машин
+    crowd=1,          // множитель плотности людей
+    pace=1,           // множитель скоростей и частоты событий (от темпа трека)
+    moodTarget=0.5,   // к чему тянется «настроение» улицы
+    camNo=3,          // номер камеры на табличке
+    trackBpm=0,
+    curTrack=-1,      // номер трека радио, на смене которого пересобираем улицу
+    cutT=0;           // короткая «переводка камеры» на смене трека
+// Соль сессии: с ней зерно улицы разное в каждом прогоне, но детерминировано
+// внутри прогона. Источник может подсунуть свой сид — тогда прогон воспроизводим.
+let sessionSalt=(Math.random()*0xffffffff)>>>0;
+
+// ===== ШУМ =====
+const perm=new Uint8Array(512);
+for(let i=0;i<512;i++)perm[i]=Math.random()*256|0;
+const fade=t=>t*t*t*(t*(t*6-15)+10);
+const grad=(h,x,y)=>(h&1?x:-x)+(h&2?y:-y);
+function noise2D(x,y){
+  const X=Math.floor(x)&255,Y=Math.floor(y)&255;
+  x-=Math.floor(x);y-=Math.floor(y);
+  const u=fade(x),v=fade(y);
+  const A=perm[X]+Y,B=perm[X+1]+Y;
+  return lerp(lerp(grad(perm[A],x,y),grad(perm[B],x-1,y),u),
+    lerp(grad(perm[A+1],x,y-1),grad(perm[B+1],x-1,y-1),u),v)*0.5+0.5;
+}
+
+// ===== НАСТРОЕНИЕ =====
+// Настроение улицы (0 — сумрачно и пусто, 1 — ясно и людно) задаёт слой
+// радио: оно же выбирает погоду и фильтрует события. Тянемся к цели плавно,
+// чтобы смена трека не выглядела щелчком.
+let mood=0.4;
+function updateMood(dt){
+  mood+=(moodTarget-mood)*Math.min(1,dt*0.6);
+}
+
+// ===== ЗОНЫ =====
+const HORIZON=H*0.58;
+const BG_BOT=H*0.67;
+const ROAD_TOP=H*0.69;
+const SIDEWALK_FAR=ROAD_TOP-14;
+const SIDEWALK_NEAR=H-42;
+// Мягкие свечи (фонари, отражения на асфальте) заданы радиусами в пикселях
+// кадра 720p. На кадре другой высоты их надо приводить к нему: иначе на
+// меньшем кадре свеча занимает непропорционально много места — и по виду,
+// и по цене: на 960x540 свечи фонарей съедали больше половины времени кадра.
+const GLOW_K=H/720;
+
+let dayT=0.05;
+const DAY_SPEED=0.00055;
+
+function nightAmt(){
+  if(dayT<0.20)return 1;
+  if(dayT<0.30)return 1-(dayT-0.20)/0.10;
+  if(dayT<0.65)return 0;
+  if(dayT<0.75)return (dayT-0.65)/0.10;
+  return 1;
+}
+
+let weather='clear',weatherTimer=rnd(30,60);
+let rainStrength=0,fogStrength=0,stormStrength=0;
+let thunderShake=0,blackoutT=0;
+let gazeX=W*0.5,gazeY=H*0.55,gazeTargetX=gazeX,gazeTargetY=gazeY;
+let season='summer',seasonTimer=rnd(120,300);
+let lastDt=0.016;
+
+// ===== МИР УЛИЦЫ =====
+// Всё, что «построено» — звёзды, облака, дома, деревья, фонари, урны, лавки,
+// стартовая толпа и капли дождя — пересобирается в buildWorld() из зерна.
+// Сами массивы объявлены здесь: buildWorld их наполняет заново.
+const stars=[],clouds=[],houses=[],trees=[],lamps=[],props=[],benches=[];
+let billboardHouse=null;
+
+// ===== ПТИЦЫ =====
+const birds=[],pigeons=[];
+function spawnBird(){
+  const y=rnd(40,HORIZON*0.5);
+  birds.push({
+    x:rnd(-100,W+100),y,
+    dir:coin()?-1:1,speed:rnd(60,120),
+    flapPhase:rnd(0,TAU),flapFreq:rnd(0.25,0.5),
+    yBase:y,scale:rnd(0.4,0.9)
+  });
+}
+function spawnPigeon(){
+  pigeons.push({
+    x:rnd(40,W-40),y:SIDEWALK_FAR+rnd(-3,3),
+    phase:rnd(0,TAU),dir:coin()?-1:1,
+    timer:rnd(2,8),moving:false,
+    flying:false,flyY:0,flyV:0
+  });
+}
+
+// ===== МАШИНЫ =====
+const cars=[];
+const carColors=['#c8c8d0','#3a3a48','#8a2020','#204080','#204020','#d0a020','#e0e0e8','#602060','#1a1a24','#804020','#406080'];
+
+function laneBusy(lane,xPos,radius){
+  for(const c of cars){
+    if(Math.abs(c.y-lane)<40 && Math.abs(c.x-xPos)<radius) return true;
+  }
+  return false;
+}
+function spawnCar(opts={}){
+  const dir=opts.dir!==undefined?opts.dir:(coin()?-1:1);
+  const lane=opts.lane!==undefined?opts.lane:
+    (dir===1
+      ?[ROAD_TOP+80,ROAD_TOP+110][Math.random()*2|0]
+      :[ROAD_TOP+22,ROAD_TOP+48][Math.random()*2|0]);
+  const scale=clamp((lane-ROAD_TOP)/(H-ROAD_TOP),0.25,1);
+  const w=opts.w||lerp(60,140,scale);
+  const sx=opts.x!==undefined?opts.x:(dir===-1?W+150:-200);
+  if(!opts.force && laneBusy(lane,sx,opts.eventTag?70:120)) return null;
+  const car={
+    x:sx,y:lane,dir,w,h:w*0.42,scale,
+    speed:opts.speed||lerp(SPEED.carSlow,SPEED.carFast,scale)*rnd(0.85,1.2)*pace,
+    color:opts.color||carColors[Math.random()*carColors.length|0],
+    isTruck:opts.isTruck!==undefined?opts.isTruck:Math.random()<0.12,
+    isMoto:opts.isMoto||false,
+    personality:Math.random(),
+    wheelAngle:0,
+    turnSignal:opts.turnSignal!==undefined?opts.turnSignal:(Math.random()<0.1?(coin()?-1:1):0),
+    isEmergency:!!opts.isEmergency,
+    emergencyColor:opts.emergencyColor||'#e0e0e0',
+    siren:0,
+    eventTag:opts.eventTag||null,
+    isManagedByEvent:false,
+    braking:false,
+    brakeSmooth:1
+  };
+  if(car.isMoto)car.isTruck=false;
+  cars.push(car);
+  return car;
+}
+
+let cleaner=null;
+function spawnCleaner(){
+  cleaner={x:rnd(W*0.2,W*0.8),dir:coin()?-1:1,y:SIDEWALK_FAR+4,phase:0};
+}
+
+// ===== ЛЮДИ =====
+const people=[];
+const shirtColors=['#a04040','#4060a0','#408050','#7050a0','#a08040','#404050','#c06040','#205050','#802040','#204020'];
+const skinTones=['#d8b090','#c09070','#a07050','#e0c0a0','#8a6040'];
+const hats=['none','none','none','cap','beanie','hood'];
+const gaits=['normal','normal','normal','slow','fast','limp'];
+const noUmbrellaEvents=new Set(['fight','crowd','parade','musician','dogWalk']);
+
+function spawnPerson(opts={}){
+  const onSidewalk=opts.onSidewalk!==undefined?opts.onSidewalk:Math.random()<0.65;
+  const isCrossing=!onSidewalk;
+  let dir;
+  let y;
+  if(opts.dir!==undefined){
+    dir=opts.dir;
+    y=opts.y!==undefined?opts.y:(onSidewalk?(dir===-1?SIDEWALK_FAR:SIDEWALK_NEAR):(dir===-1?SIDEWALK_NEAR:SIDEWALK_FAR));
+  } else if(onSidewalk){
+    dir=coin()?-1:1;
+    y=opts.y!==undefined?opts.y:(dir===-1?SIDEWALK_FAR:SIDEWALK_NEAR);
+  } else {
+    if(coin()){
+      y=SIDEWALK_NEAR;
+      dir=-1;
+    } else {
+      y=SIDEWALK_FAR;
+      dir=1;
+    }
+    if(opts.y!==undefined)y=opts.y;
+  }
+  const scale=clamp((y-ROAD_TOP)/(H-ROAD_TOP),0.2,1);
+  const h=opts.h||lerp(28,68,scale);
+  const gait=opts.gait||gaits[Math.random()*gaits.length|0];
+  let baseSpeed;
+  switch(gait){
+    case 'slow':baseSpeed=SPEED.personSlow;break;
+    case 'fast':baseSpeed=SPEED.personFast;break;
+    case 'limp':baseSpeed=SPEED.personSlow*0.8;break;
+    default:baseSpeed=SPEED.personNormal;
+  }
+  const allowUmbrella=!opts.eventTag||!noUmbrellaEvents.has(opts.eventTag);
+  const hasUmbrella=allowUmbrella&&rainStrength>0.25&&Math.random()<0.75;
+
+  const p={
+    x:opts.x!==undefined?opts.x:(isCrossing?rnd(W*0.15,W*0.85):(dir===-1?W+40:-40)),
+    y,dir,scale,h,
+    speed:opts.speed!==undefined?opts.speed:baseSpeed*lerp(0.7,1.3,scale)*rnd(0.85,1.15)*pace,
+    phase:rnd(0,TAU),
+    shirt:opts.shirt||shirtColors[Math.random()*shirtColors.length|0],
+    skin:skinTones[Math.random()*skinTones.length|0],
+    pants:`hsl(${rnd(200,260)|0},${rnd(10,35)|0}%,${rnd(15,32)|0}%)`,
+    hasBag:Math.random()<0.3,
+    umbrella:hasUmbrella,
+    umbrellaColor:`hsl(${rnd(0,360)|0},60%,50%)`,
+    wetness:hasUmbrella?0:0.6,
+    hat:opts.hat||hats[Math.random()*hats.length|0],
+    gait,talkPhase:rnd(0,TAU),
+    phone:Math.random()<0.25,
+    sideStep:0,
+    isDog:!!opts.isDog,
+    isCrossing,
+    eventTag:opts.eventTag||null,
+    isMusician:!!opts.isMusician,
+    blinkTimer:rnd(2,5),
+    isBlinking:false,
+    umbrellaCheckTimer:rnd(0.5,1.5),
+    tiredTimer:0,
+    frozen:false,
+    hitCooldown:0,
+    escapeMode:'idle',
+    thawTimer:0
+  };
+  people.push(p);
+  return p;
+}
+
+// ===== ДОЖДЬ =====
+const rainDrops=[];
+const splashes=[];
+let splashCooldown=0;
+function updateSplashes(dt){
+  splashCooldown-=dt;
+  if(rainStrength>0.3 && splashCooldown<=0){
+    const count=(rainStrength*2|0)+1;
+    for(let i=0;i<count;i++){
+      const y=rnd(ROAD_TOP+40,H-5);
+      const scale=(y-ROAD_TOP)/(H-ROAD_TOP);
+      splashes.push({x:rnd(0,W),y,r:1,maxR:4+scale*8,life:0.5,maxLife:0.5});
+    }
+    splashCooldown=0.06;
+  }
+}
+
+const fx={particles:[],flashes:[],meteors:[]};
+
+// ===== СБОРКА УЛИЦЫ ИЗ ЗЕРНА =====
+// Вызывается на старте и на каждом новом треке радио. Всё «построенное»
+// пересобирается заново: силуэт домов, окна, деревья, фонари, урны, лавки,
+// облака, капли дождя и стартовая толпа. Плотность машин и людей приходит из
+// профиля слоя (traffic/crowd), поэтому ночные слои дают пустую улицу, а
+// живые — людную.
+function buildWorld(){
+  stars.length=0;
+  for(let i=0;i<180;i++){
+    stars.push({
+      x:WORLD()*W,y:WORLD()*HORIZON*0.85,
+      tw:wrnd(0,TAU),s:wrnd(0.4,2.2),sp:wrnd(0.5,3.0),
+      color:WORLD()<0.85?'255,255,255':(wcoin()?'255,200,150':'180,210,255')
+    });
+  }
+
+  clouds.length=0;
+  for(let i=0;i<20;i++){
+    clouds.push({
+      x:wrnd(-300,W+300),y:wrnd(30,HORIZON*0.65),
+      w:wrnd(120,400),h:wrnd(30,90),
+      speed:wrnd(1.5,9),a:wrnd(0.05,0.22),
+      layer:WORLD()*3|0
+    });
+  }
+
+  houses.length=0;
+  for(let layer=0;layer<3;layer++){
+    const count=[16,20,24][layer];
+    for(let i=0;i<count;i++){
+      const w=wrnd(50,120)*(1-layer*0.08);
+      const windows=[];
+      const winCount=Math.floor(wrnd(5,18));
+      for(let j=0;j<winCount;j++){
+        const isOn=wcoin();
+        windows.push({
+          u:wrnd(0.15,0.85),v:wrnd(0.15,0.85),
+          phase:wrnd(0,TAU),
+          on:isOn,
+          warm:WORLD()<0.75,
+          tvFlicker:isOn && WORLD()<0.1,
+          flickerSpeed:wrnd(3,6),
+          dim:isOn?1:0.12,
+          targetDim:isOn?1:0.12
+        });
+      }
+      houses.push({
+        layer,x:i*(W/count)+wrnd(-20,20),w,
+        h:wrnd(70,190)*(1-layer*0.05),
+        shade:wrnd(0.35,0.75)*(0.7+layer*0.15),
+        roofH:wrnd(15,35),
+        hasSpire:WORLD()<0.15,
+        hasBillboard:false,
+        hasAwning:WORLD()<0.4,
+        _winTimer:wrnd(20,120),
+        windows
+      });
+      // Окна держим сгруппированными по цвету: так в кадре цвет меняется
+      // не на каждом окне, а пару раз на дом.
+      windows.sort((a,b)=>(a.warm?0:1)-(b.warm?0:1));
+    }
+  }
+  const mid=houses.filter(h=>h.layer===1&&h.x>W*0.15&&h.x<W*0.75);
+  billboardHouse=mid.length?mid[mid.length*0.7|0]:houses[houses.length/2|0];
+  if(billboardHouse)billboardHouse.hasBillboard=true;
+
+  trees.length=0;
+  for(let i=0;i<16;i++){
+    trees.push({
+      x:wrnd(0,W),size:wrnd(35,70),sway:wrnd(0,TAU),
+      shade:wrnd(0.3,0.6),layers:Math.floor(wrnd(4,7)),
+      baseYOffset:wrnd(0,6)
+    });
+  }
+
+  lamps.length=0;
+  const lampCount=6+Math.round(wrnd(0,4));
+  for(let i=0;i<lampCount;i++){
+    lamps.push({
+      x:60+i*(W-120)/Math.max(1,lampCount-1),phase:wrnd(0,TAU),
+      broken:WORLD()<0.15,pulse:wrnd(0.5,2.5),
+      flickerSeed:WORLD()*1000
+    });
+  }
+
+  props.length=0;
+  const propCount=10+Math.round(wrnd(0,8));
+  for(let i=0;i<propCount;i++){
+    const isSign=WORLD()<0.5;
+    props.push({
+      type:isSign?'sign':'bin',
+      x:wrnd(40,W-40),y:SIDEWALK_FAR,
+      signColor:isSign?(WORLD()<0.4?'#c02828':'#2060b0'):null,
+      filled:wrnd(0.3,1.0)
+    });
+  }
+
+  benches.length=0;
+  const benchCount=3+Math.round(wrnd(0,3));
+  for(let i=0;i<benchCount;i++)benches.push({x:150+i*(W-300)/Math.max(1,benchCount-1),y:SIDEWALK_FAR});
+
+  rainDrops.length=0;
+  for(let i=0;i<260;i++){
+    const size=WORLD();
+    rainDrops.push({x:wrnd(-150,W+150),y:wrnd(0,H),v:(8+size*18)*8,len:6+size*14,vx:wrnd(-0.6,0.6)});
+  }
+
+  // стартовая жизнь на улице
+  cars.length=0;people.length=0;birds.length=0;pigeons.length=0;splashes.length=0;
+  fx.particles.length=0;fx.flashes.length=0;fx.meteors.length=0;
+  const carStart=Math.round(8*traffic);
+  for(let i=0;i<carStart;i++){const r=spawnCar();if(r)r.x=wrnd(-100,W+100);}
+  const peopleStart=Math.round(12*crowd);
+  for(let i=0;i<peopleStart;i++){const p=spawnPerson();p.x=wrnd(-30,W+30);}
+  for(let i=0;i<4;i++)spawnBird();
+  for(let i=0;i<6;i++)spawnPigeon();
+  // Уборщик выходит только в дождь — им заведует updateCleaner.
+  cleaner=null;
+}
+
+// Погода по настроению улицы: чем сумрачнее слой, тем вероятнее дождь, туман
+// и гроза; чем светлее и живее — тем чаще ясно.
+function pickWeatherFor(m){
+  const r=Math.random();
+  if(m<0.25)return r<0.55?'storm':r<0.85?'rain':'fog';
+  if(m<0.45)return r<0.45?'rain':r<0.75?'fog':'clear';
+  if(m<0.70)return r<0.65?'clear':r<0.88?'rain':'fog';
+  return r<0.85?'clear':'fog';
+}
+
+// ===== ПЕРЕСБОРКА УЛИЦЫ ПОД НОВЫЙ ТРЕК =====
+// Радио сменило трек — улица переезжает: другой квартал, другой час, другой
+// сезон, другая погода, другая плотность жизни. Всё это выводится из слоя
+// трека и его темпа, поэтому картинка идёт в настроении музыки.
+function rollStreet(music){
+  let layer=(music&&music.mood)||'chillhop';
+  // Репетиция (?switch=N) и фиксация слоя (?m=/?genre=) — только для просмотра:
+  // в эфире улица всегда идёт за текущим слоем радио.
+  if(globalThis.SCENE_FORCE&&STREETS[globalThis.SCENE_FORCE])layer=globalThis.SCENE_FORCE;
+  else if(Number(globalThis.SCENE_SWITCH_SEC||0)>0)layer=wpick(Object.keys(STREETS));
+  const prof=STREETS[layer]||STREET_FALLBACK;
+  trackBpm=Math.round((music&&music.bpm)||0);
+  if(music&&typeof music.seed==='number')sessionSalt=music.seed>>>0;
+  // Зерно сцены: номер трека и соль сессии. Один и тот же номер в разных
+  // прогонах даёт разные улицы, а внутри прогона сцена воспроизводима.
+  WORLD=mulberry32((((curTrack+1)*2654435761)>>>0^sessionSalt)>>>0);
+
+  traffic=clamp(prof.traffic*wrnd(0.85,1.15),0.25,1.6);
+  crowd=clamp(prof.crowd*wrnd(0.85,1.15),0.2,1.5);
+  // Темп трека = темп улицы: 80 bpm — единица, 130 — заметно живее.
+  pace=clamp((trackBpm||80)/80,0.7,1.5);
+  moodTarget=clamp(wrnd(prof.mood[0],prof.mood[1]),0,1);
+  mood=moodTarget;
+  camNo=1+Math.round(wrnd(0,8));
+  dayT=wrnd(prof.hour[0],prof.hour[1])%1;
+  if(dayT<0)dayT+=1;
+  season=wpick(prof.season);
+  seasonTimer=1e9;                     // сезон задаёт трек, а не таймер
+  // Дата архивной записи. Месяц берём из того же времени года, что и на
+  // картинке: сцена выбирает сезон сама, и если в кадре осень, а на плашке
+  // июль — подмена видна сразу. Год всегда 2026.
+  archive.month=wpick(SEASON_MONTHS[season]);
+  archive.day=1+Math.floor(WORLD()*28);
+  // Имя композиции — как у настоящего трека: два слова из списков, повторы
+  // редки, а слушателю есть за что зацепиться глазом.
+  compName=wpick(COMP_A)+' '+wpick(COMP_B);
+  weather=pickWeatherFor(moodTarget);
+  weatherTimer=wrnd(60,150);
+  rainStrength=weather==='rain'?0.7:weather==='storm'?1.0:0;
+  fogStrength=weather==='fog'?1:0;
+  stormStrength=weather==='storm'?1:0;
+  lightningTimer=wrnd(15,60);
+  if(currentEvent)endEvent();
+  eventTimer=wrnd(4,12)/pace;
+  buildWorld();
+  freshBakes();
+  cutT=0.5;                            // короткая переводка камеры
+}
+
+let t=0,last=performance.now();
+let carTimer=0,personTimer=0,birdTimer=0;
+let eventTimer=rnd(8,20);
+let currentEvent=null,currentEvent_label='',eventDuration=0,eventAge=0;
+let eventData={};
+let lightningFlash=0,lightningTimer=rnd(15,60);
+
+// ===== СОБЫТИЯ =====
+const EVENTS=[
+  {id:'ambulance',weight:1.0,label:'СКОРАЯ ПОМОЩЬ',minMood:0,maxMood:1,
+    setup(){
+      const cc=spawnCar({isEmergency:true,emergencyColor:'#f0f0f0',speed:SPEED.emergency,dir:-1,lane:ROAD_TOP+35,x:W+200,eventTag:'ambulance'});
+      if(cc){cc.w=130;cc.isTruck=false;cc.isManagedByEvent=true;}
+      eventData.car=cc;
+    },
+    update(dt){
+      const cc=eventData.car;if(!cc)return;
+      cc.siren+=dt*8;cc.x+=cc.dir*cc.speed*dt;
+      if(Math.random()<0.5)fx.flashes.push({
+        x:cc.x-cc.dir*cc.w*0.5,y:cc.y,life:0.15,maxLife:0.15,
+        color:Math.sin(cc.siren)>0?'#ff2020':'#2040ff'
+      });
+    },
+    isDone(){return !eventData.car||eventData.car.x<-300;}},
+
+  {id:'chase',weight:0.7,label:'ПОГОНЯ',minMood:0,maxMood:1,
+    setup(){
+      const cop=spawnCar({isEmergency:true,emergencyColor:'#0a0a3a',speed:SPEED.emergency,dir:-1,lane:ROAD_TOP+35,x:W+200,eventTag:'chase'});
+      const bad=spawnCar({color:'#3a0808',speed:SPEED.emergency*0.9,dir:-1,lane:ROAD_TOP+48,x:W+280,eventTag:'chase'});
+      if(cop)cop.isManagedByEvent=true;
+      if(bad)bad.isManagedByEvent=true;
+      eventData.cop=cop;eventData.bad=bad;
+    },
+    update(dt){
+      const cop=eventData.cop,bad=eventData.bad;if(!cop||!bad)return;
+      cop.siren+=dt*10;
+      cop.x+=cop.dir*cop.speed*dt;
+      bad.x+=bad.dir*bad.speed*dt;
+    },
+    isDone(){return !eventData.cop||eventData.cop.x<-300;}},
+
+  {id:'parade',weight:0.5,label:'ПАРАД',minMood:0.4,maxMood:1,
+    setup(){
+      const lead=spawnCar({color:'#d0a020',speed:SPEED.carSlow*0.3,dir:1,lane:ROAD_TOP+100,x:-250,isTruck:true,eventTag:'parade'});
+      if(lead){lead.w=160;lead.isManagedByEvent=true;}
+      eventData.lead=lead;
+      eventData.spawnQueue=12;
+      eventData.spawnTimer=0.3;
+      eventData.spawnInterval=0.5;
+    },
+    update(dt){
+      const l=eventData.lead;
+      if(l){
+        l.x+=l.dir*l.speed*dt;
+        if(Math.random()<0.3)fx.particles.push({
+          x:l.x+rnd(-40,40),y:l.y-20,vx:rnd(-30,30),vy:rnd(-120,-60),
+          life:rnd(1,2),maxLife:2,
+          color:`hsl(${rnd(0,360)|0},90%,65%)`,size:rnd(2,4)
+        });
+      }
+      eventData.spawnTimer-=dt;
+      if(eventData.spawnTimer<=0 && eventData.spawnQueue>0){
+        const side=coin()?-40:W+40;
+        spawnPerson({
+          dir:side<0?1:-1,y:SIDEWALK_NEAR-2+rnd(-2,2),x:side,
+          gait:'slow',shirt:`hsl(${rnd(0,360)|0},70%,60%)`,
+          eventTag:'parade',speed:SPEED.personSlow*1.2
+        });
+        eventData.spawnQueue--;
+        eventData.spawnTimer=eventData.spawnInterval;
+      }
+    },
+    isDone(){return (!eventData.lead||eventData.lead.x>W+250) && eventData.spawnQueue===0;}},
+
+  {id:'meteor',weight:0.4,label:'МЕТЕОР',minMood:0,maxMood:0.6,
+    setup(){eventData.meteorSpawned=false;eventData.dayT=0;},
+    update(dt){
+      const n=nightAmt();
+      if(n<0.3){eventData.dayT+=dt;}
+      else{
+        eventData.dayT=0;
+        if(!eventData.meteorSpawned){
+          eventData.meteorSpawned=true;
+          fx.meteors.push({x:rnd(0,W),y:-50,vx:rnd(-150,150),vy:300,life:2,maxLife:2,len:80});
+        }
+        if(Math.random()<0.02)fx.meteors.push({
+          x:rnd(0,W),y:-50,vx:rnd(-120,120),vy:rnd(200,400),
+          life:rnd(1.2,2),maxLife:2,len:rnd(40,100)
+        });
+      }
+    },
+    isDone(){return eventAge>20 || eventData.dayT>3;}},
+
+  {id:'blackout',weight:0.5,label:'ОТКЛЮЧЕНИЕ СВЕТА',minMood:0,maxMood:1,
+    setup(){blackoutT=1.0;eventData.recoverT=0;},
+    update(dt){
+      blackoutT=Math.max(0,blackoutT-dt*0.15);
+      if(blackoutT<0.1)eventData.recoverT+=dt;
+    },
+    isDone(){return blackoutT<=0&&eventData.recoverT>8;}},
+
+  {id:'cat',weight:0.8,label:'КОТ',minMood:0,maxMood:1,
+    setup(){
+      const startX=rnd(W*0.3,W*0.7);
+      eventData.cat={
+        x0:startX,y0:SIDEWALK_NEAR,y1:SIDEWALK_FAR,
+        x1:startX+rnd(-60,60),x:startX,y:SIDEWALK_NEAR,
+        t:0,dur:rnd(2.5,3.5),phase:rnd(0,TAU)
+      };
+    },
+    update(dt){
+      const cat=eventData.cat;if(!cat)return;
+      cat.t+=dt;
+      const k=clamp(cat.t/cat.dur,0,1);
+      const e=k*k*(3-2*k);
+      cat.x=lerp(cat.x0,cat.x1,e);
+      cat.y=lerp(cat.y0,cat.y1,e);
+      cat.phase+=dt*8;
+      if(k>=1)eventData.cat=null;
+    },
+    draw(ctx){
+      const cat=eventData.cat;if(!cat)return;
+      const dir=cat.x1>=cat.x0?1:-1;
+      const flip=cat.y1<cat.y0?-1:1;
+      const bodyH=8,bodyW=16;
+      ctx.fillStyle='rgba(0,0,0,0.5)';
+      ctx.beginPath();ctx.ellipse(cat.x,cat.y+bodyH*0.5,bodyW*0.5,bodyH*0.3,0,0,TAU);ctx.fill();
+      ctx.fillStyle='#1a1a1a';
+      ctx.beginPath();ctx.ellipse(cat.x,cat.y,bodyW*0.5,bodyH*0.5,0,0,TAU);ctx.fill();
+      ctx.strokeStyle='#1a1a1a';ctx.lineWidth=2;ctx.lineCap='round';
+      ctx.beginPath();
+      ctx.moveTo(cat.x-dir*bodyW*0.5,cat.y);
+      ctx.quadraticCurveTo(
+        cat.x-dir*bodyW*0.9,cat.y-5*flip+Math.sin(cat.phase)*2,
+        cat.x-dir*bodyW,cat.y-10*flip+Math.sin(cat.phase)*3
+      );
+      ctx.stroke();
+      ctx.beginPath();ctx.arc(cat.x+dir*bodyW*0.4,cat.y-2*flip,3.5,0,TAU);ctx.fill();
+      const n=nightAmt();
+      if(n>0.3){
+        ctx.fillStyle=`rgba(255,230,120,${n})`;
+        ctx.fillRect(cat.x+dir*bodyW*0.4-1.5,cat.y-3,1.2,1.2);
+        ctx.fillRect(cat.x+dir*bodyW*0.4+0.5,cat.y-3,1.2,1.2);
+      }
+    },
+    isDone(){return !eventData.cat;}},
+
+  {id:'fight',weight:0.6,label:'ДРАКА',minMood:0,maxMood:0.5,
+    setup(){
+      const x0=rnd(W*0.3,W*0.7);
+      const a=spawnPerson({x:x0-100,y:SIDEWALK_NEAR,dir:1,gait:'fast',shirt:'#602020',eventTag:'fight',speed:0});
+      const b=spawnPerson({x:x0+100,y:SIDEWALK_NEAR,dir:-1,gait:'fast',shirt:'#202060',eventTag:'fight',speed:0});
+      eventData.a=a;eventData.b=b;eventData.x0=x0;eventData.phase='approach';
+    },
+    update(dt){
+      const a=eventData.a,b=eventData.b;if(!a||!b)return;
+      if(eventData.phase==='approach'){
+        const speedA=SPEED.personFast*dt;
+        if(a.x < eventData.x0-15) a.x+=speedA;
+        if(b.x > eventData.x0+15) b.x-=speedA;
+        if(Math.abs(a.x-(eventData.x0-15))<3 && Math.abs(b.x-(eventData.x0+15))<3){
+          a.dir=1;b.dir=-1;
+          eventData.phase='fight';
+        }
+      } else {
+        a.x=eventData.x0-15+Math.sin(t*12)*3;
+        b.x=eventData.x0+15-Math.sin(t*12)*3;
+        if(Math.random()<0.1)fx.flashes.push({
+          x:(a.x+b.x)/2,y:(a.y+b.y)/2-20,
+          life:0.15,maxLife:0.15,color:'#ffffff'
+        });
+      }
+    },
+    isDone(){return eventAge>15 && eventData.phase==='fight';}},
+
+  {id:'musician',weight:0.7,label:'МУЗЫКАНТ',minMood:0.3,maxMood:1,
+    setup(){
+      const x0=rnd(W*0.3,W*0.7);
+      const m=spawnPerson({x:x0,y:SIDEWALK_FAR,dir:1,gait:'normal',shirt:'#402040',eventTag:'musician',speed:0});
+      m.isMusician=true;m.dance=0;
+      eventData.musician=m;eventData.x0=x0;
+    },
+    update(dt){
+      const m=eventData.musician;if(!m)return;
+      m.dance+=dt*4;
+      m.x=eventData.x0+Math.sin(m.dance*0.5)*4;
+    },
+    isDone(){return eventAge>25;}},
+
+  {id:'pigeons',weight:0.6,label:'СТАЯ ГОЛУБЕЙ',minMood:0.4,maxMood:1,
+    setup(){eventData.flockT=0;},
+    update(dt){
+      eventData.flockT+=dt;
+      if(eventData.flockT>0.3&&eventData.flockT<0.5){
+        for(const p of pigeons){
+          if(!p.flying){p.flying=true;p.flyY=0;p.flyV=rnd(-3,-1.5);}
+        }
+      }
+    },
+    isDone(){return eventData.flockT>5;}},
+
+  {id:'drone',weight:0.5,label:'ДРОН',minMood:0,maxMood:1,
+    setup(){eventData.drone={x:-50,y:rnd(H*0.12,H*0.25),vx:60,phase:0};},
+    update(dt){
+      const d=eventData.drone;if(!d)return;
+      d.phase+=dt*20;d.x+=d.vx*dt;
+      d.y+=Math.sin(d.phase*0.1)*30*dt;
+    },
+    draw(ctx){
+      const d=eventData.drone;if(!d)return;
+      const n=nightAmt();
+      ctx.beginPath();ctx.arc(d.x-6,d.y,2,0,TAU);
+      ctx.fillStyle=`rgba(255,40,40,${0.9*n})`;ctx.fill();
+      ctx.beginPath();ctx.arc(d.x+6,d.y,2,0,TAU);
+      ctx.fillStyle=`rgba(40,255,40,${0.9*n})`;ctx.fill();
+      ctx.fillStyle='rgba(30,30,40,0.9)';
+      ctx.fillRect(d.x-5,d.y-2,10,4);
+    },
+    isDone(){return !eventData.drone||eventData.drone.x>W+50;}},
+
+  {id:'fireworks',weight:0.6,label:'САЛЮТ',minMood:0.5,maxMood:1,
+    setup(){eventData.fwT=0;},
+    update(dt){
+      eventData.fwT+=dt;
+      if(Math.random()<0.03){
+        const rx=rnd(W*0.2,W*0.8),ry=rnd(H*0.2,H*0.35),hue=rnd(0,360)|0;
+        for(let i=0;i<24;i++){
+          const angle=(i/24)*TAU,speed=rnd(120,240);
+          fx.particles.push({
+            x:rx,y:ry,vx:Math.cos(angle)*speed,vy:Math.sin(angle)*speed,
+            life:rnd(1.5,2.5),maxLife:2.5,
+            color:`hsl(${hue+rnd(-20,20)|0},90%,65%)`,size:rnd(1.5,3)
+          });
+        }
+      }
+    },
+    isDone(){return eventAge>20;}},
+
+  {id:'robber',weight:0.5,label:'ПОДОЗРИТЕЛЬНЫЙ',minMood:0,maxMood:0.6,
+    setup(){
+      const p=spawnPerson({x:rnd(W*0.2,W*0.5),y:SIDEWALK_NEAR,dir:1,gait:'fast',shirt:'#1a1a2a',hat:'hood',eventTag:'robber',speed:SPEED.personRun});
+      p.hasBag=true;p.tiredTimer=0;
+      eventData.robber=p;
+    },
+    update(dt){
+      const p=eventData.robber;if(!p)return;
+      if(!people.includes(p)){eventData.robber=null;return;}
+      p.tiredTimer-=dt;
+      if(p.tiredTimer<=0){
+        p.speed=Math.max(SPEED.personNormal,p.speed*0.9);
+        p.tiredTimer=2;
+      }
+    },
+    isDone(){return !eventData.robber||eventData.robber.x>W+60;}},
+
+  {id:'glitch',weight:0.3,label:'СБОЙ СИГНАЛА',minMood:0,maxMood:1,
+    setup(){eventData.glitchT=0;},
+    update(dt){eventData.glitchT+=dt;},
+    draw(){},
+    isDone(){return eventData.glitchT>3;}},
+
+  {id:'helicopter',weight:0.4,label:'ВЕРТОЛЁТ',minMood:0,maxMood:1,
+    setup(){eventData.heli={x:-100,y:rnd(H*0.2,H*0.35),vx:80,phase:0};},
+    update(dt){
+      const h=eventData.heli;if(!h)return;
+      h.phase+=dt*30;h.x+=h.vx*dt;
+    },
+    draw(ctx){
+      const h=eventData.heli;if(!h)return;
+      const n=nightAmt();
+      const beamBottom=Math.min(h.y+280,HORIZON);
+      const g=ctx.createLinearGradient(h.x,h.y,h.x,beamBottom);
+      g.addColorStop(0,`rgba(255,255,220,${0.15*n})`);
+      g.addColorStop(1,'rgba(255,255,220,0)');
+      ctx.fillStyle=g;
+      ctx.beginPath();
+      ctx.moveTo(h.x-8,h.y+4);ctx.lineTo(h.x-80,beamBottom);
+      ctx.lineTo(h.x+80,beamBottom);ctx.lineTo(h.x+8,h.y+4);
+      ctx.closePath();ctx.fill();
+      ctx.fillStyle='rgba(30,30,40,0.9)';
+      ctx.beginPath();ctx.ellipse(h.x,h.y,22,8,0,0,TAU);ctx.fill();
+      ctx.fillRect(h.x-40,h.y-2,22,4);
+      ctx.strokeStyle=`rgba(180,180,190,${0.4+0.4*Math.abs(Math.sin(h.phase))})`;
+      ctx.lineWidth=2;
+      ctx.beginPath();ctx.ellipse(h.x,h.y-10,30,3,0,0,TAU);ctx.stroke();
+      if(Math.sin(h.phase*0.3)>0){
+        ctx.fillStyle=`rgba(255,40,40,${n})`;
+        ctx.beginPath();ctx.arc(h.x-40,h.y,2,0,TAU);ctx.fill();
+      }
+    },
+    isDone(){return !eventData.heli||eventData.heli.x>W+100;}},
+
+  {id:'dogWalk',weight:0.7,label:'С СОБАКОЙ',minMood:0.3,maxMood:1,
+    setup(){
+      const owner=spawnPerson({x:rnd(0,W*0.5),y:SIDEWALK_NEAR,dir:1,gait:'normal',shirt:'#408060',eventTag:'dogWalk',speed:0});
+      owner.umbrella=false;
+      const dog=spawnPerson({x:owner.x+20,y:owner.y+4,dir:1,gait:'fast',isDog:true,eventTag:'dogWalk',speed:0});
+      dog.h=owner.h*0.35;
+      eventData.owner=owner;eventData.dog=dog;
+    },
+    update(dt){
+      const o=eventData.owner,d=eventData.dog;if(!o||!d)return;
+      o.x+=o.dir*SPEED.personSlow*1.2*dt;
+      d.x=o.x+18+Math.sin(t*3)*4;
+      d.dir=o.dir;
+    },
+    isDone(){return !eventData.owner||eventData.owner.x>W+60;}},
+
+  {id:'crash',weight:0.4,label:'ДТП',minMood:0,maxMood:0.7,
+    setup(){
+      const lane=ROAD_TOP+95;
+      const a=spawnCar({dir:-1,lane,x:W*0.55,eventTag:'crash',speed:0,force:true});
+      const b=spawnCar({dir:1,lane,x:W*0.42,eventTag:'crash',speed:0,force:true});
+      if(a)a.isManagedByEvent=true;
+      if(b)b.isManagedByEvent=true;
+      eventData.a=a;eventData.b=b;
+      if(a&&b){
+        fx.flashes.push({x:(a.x+b.x)/2,y:(a.y+b.y)/2,life:0.4,maxLife:0.4,color:'#ffcc40'});
+        for(let i=0;i<20;i++)fx.particles.push({
+          x:(a.x+b.x)/2+rnd(-10,10),y:(a.y+b.y)/2+rnd(-5,5),
+          vx:rnd(-60,60),vy:rnd(-120,-30),
+          life:rnd(1,2),maxLife:2,
+          color:'rgba(120,120,120,0.6)',size:rnd(4,8)
+        });
+      }
+    },
+    isDone(){return eventAge>15;}},
+
+  {id:'brokenLamp',weight:0.5,label:'ФОНАРЬ МИГАЕТ',minMood:0,maxMood:1,
+    setup(){
+      const cand=lamps.filter(l=>!l.broken);
+      if(cand.length)cand[Math.random()*cand.length|0].broken=true;
+    },
+    isDone(){return eventAge>12;}},
+
+  {id:'comet',weight:0.3,label:'КОМЕТА',minMood:0,maxMood:1,
+    setup(){
+      fx.meteors.push({x:rnd(0,W),y:-100,vx:rnd(-80,80),vy:150,life:4,maxLife:4,len:200,big:true});
+    },
+    isDone(){return eventAge>12;}},
+
+  {id:'crowd',weight:0.5,label:'ТОЛПА',minMood:0.5,maxMood:1,
+    setup(){eventData.spawnQueue=20;eventData.spawnTimer=0;eventData.spawnInterval=0.4;},
+    update(dt){
+      eventData.spawnTimer-=dt;
+      if(eventData.spawnTimer<=0 && eventData.spawnQueue>0){
+        const side=coin()?-40:W+40;
+        spawnPerson({
+          x:side,y:SIDEWALK_NEAR+rnd(-4,4),dir:side<0?1:-1,
+          gait:'slow',eventTag:'crowd',speed:SPEED.personSlow*0.6
+        });
+        eventData.spawnQueue--;
+        eventData.spawnTimer=eventData.spawnInterval;
+      }
+    },
+    isDone(){return eventAge>15 && eventData.spawnQueue===0;}},
+
+  {id:'snow',weight:0.4,label:'СНЕГ',minMood:0,maxMood:0.5,
+    setup(){eventData.snowT=0;weather='clear';weatherTimer=60;rainStrength=0;},
+    update(dt){
+      if(season!=='winter'){eventData.snowT=999;return;}
+      eventData.snowT+=dt;
+      if(Math.random()<0.5){
+        const windMul=1+stormStrength*2;
+        fx.particles.push({
+          x:rnd(0,W),y:-5,vx:rnd(-30,30)*windMul,vy:rnd(30,90),
+          life:6,maxLife:6,color:'rgba(255,255,255,0.7)',size:rnd(1,2)
+        });
+      }
+    },
+    isDone(){return eventData.snowT>20;}},
+
+  {id:'fire',weight:0.3,label:'ПОЖАР',minMood:0,maxMood:1,
+    setup(){
+      const candidates=houses.filter(h=>h.layer<=1);
+      if(!candidates.length){eventData.fireHouse=null;return;}
+      const h=candidates[Math.random()*candidates.length|0];
+      const litWindows=h.windows.filter(w=>w.on);
+      if(!litWindows.length){eventData.fireHouse=null;return;}
+      eventData.fireHouse=h;
+      eventData.fireWindow=litWindows[Math.random()*litWindows.length|0];
+    },
+    update(){
+      if(Math.random()<0.6){
+        const h=eventData.fireHouse,w=eventData.fireWindow;if(!h||!w)return;
+        const par=h.layer*0.08;
+        const gazePull=(gazeX-W/2)*par*0.02;
+        const hx=h.x-h.w/2+gazePull;
+        const hy=HORIZON-h.h-h.layer*6;
+        const wx=hx+w.u*h.w,wy=hy+w.v*h.h;
+        fx.particles.push({
+          x:wx+rnd(-3,3),y:wy+rnd(-3,3),vx:rnd(-15,15),vy:rnd(-50,-20),
+          life:rnd(1.5,2.5),maxLife:2.5,
+          color:`hsl(${rnd(15,40)|0},90%,55%)`,size:rnd(2,5)
+        });
+        if(Math.random()<0.3)fx.particles.push({
+          x:wx+rnd(-5,5),y:wy-10,vx:rnd(-10,10),vy:rnd(-30,-10),
+          life:rnd(2,3.5),maxLife:3.5,
+          color:'rgba(30,30,40,0.7)',size:rnd(4,8)
+        });
+      }
+    },
+    isDone(){return eventAge>25;}},
+
+  {id:'biker',weight:0.6,label:'БАЙКЕР',minMood:0,maxMood:1,
+    setup(){
+      const b=spawnCar({color:'#0a0a0a',speed:SPEED.biker,dir:-1,lane:ROAD_TOP+35,x:W+200,w:40,eventTag:'biker'});
+      if(b){b.isMoto=true;b.isTruck=false;b.isManagedByEvent=true;}
+      eventData.biker=b;
+    },
+    update(dt){const b=eventData.biker;if(!b)return;b.x+=b.dir*b.speed*dt;},
+    isDone(){return !eventData.biker||eventData.biker.x<-100;}},
+
+  {id:'lovers',weight:0.6,label:'ПАРА',minMood:0.5,maxMood:1,
+    setup(){
+      const a=spawnPerson({x:rnd(W*0.3,W*0.6),y:SIDEWALK_NEAR,dir:1,gait:'slow',shirt:'#a06080',eventTag:'lovers',speed:0});
+      const b=spawnPerson({x:a.x+12,y:SIDEWALK_NEAR,dir:1,gait:'slow',shirt:'#6060a0',eventTag:'lovers',speed:0});
+      eventData.a=a;eventData.b=b;
+    },
+    update(dt){
+      const a=eventData.a,b=eventData.b;if(!a||!b)return;
+      a.x+=a.dir*SPEED.personSlow*dt;
+      b.x=a.x+12;b.dir=a.dir;
+    },
+    isDone(){return !eventData.a||eventData.a.x>W+60;}},
+
+  {id:'stormEvent',weight:0.4,label:'ГРОЗА',minMood:0,maxMood:0.5,
+    setup(){weather='storm';weatherTimer=40;},
+    isDone(){return eventAge>25;}},
+
+  {id:'rainbow',weight:0.3,label:'РАДУГА',minMood:0.4,maxMood:1,
+    setup(){weather='clear';weatherTimer=rnd(30,60);eventData.rainbowT=0;},
+    update(dt){
+      eventData.rainbowT+=dt;
+      if(rainStrength>0.35 && eventData.rainbowT>3) eventData.rainbowT=999;
+    },
+    isDone(){return eventData.rainbowT>20 || season==='winter' || rainStrength>0.35;}}
+];
+
+// История недавних событий: одно и то же не выпадает, пока не пройдут девять
+// других. За прогон событие возвращается, но всегда — на другой улице, в
+// другой час и в другой погоде, поэтому повтор не читается как повтор.
+const recentEvents=[];
+const EVENT_MEMORY=9;
+function pickEvent(){
+  const ok=(e)=>mood>=e.minMood&&mood<=e.maxMood&&(!currentEvent||e.id!==currentEvent);
+  // Сначала стараемся не повторять ничего из последних девяти.
+  let valid=EVENTS.filter((e)=>ok(e)&&recentEvents.indexOf(e.id)<0);
+  if(!valid.length){
+    // Слой узкий: ночные и слишком живые дают набор в восемь-девять событий,
+    // и в памяти может не остаться свободного. Тогда уступаем, но не до
+    // конца: последние четыре не показываем ни за что, а из остальных берём
+    // самое давнее — так пауза до повтора выходит самой длинной из возможных.
+    const tail=recentEvents.slice(0,4);
+    valid=EVENTS.filter((e)=>ok(e)&&tail.indexOf(e.id)<0);
+    if(valid.length){
+      let best=valid[0],bestAge=-2;
+      for(const e of valid){
+        const seen=recentEvents.indexOf(e.id);
+        const age=seen<0?1e9:seen;
+        if(age>bestAge){bestAge=age;best=e;}
+      }
+      return best;
+    }
+  }
+  if(!valid.length)valid=EVENTS.filter((e)=>ok(e));
+  if(!valid.length)return null;
+  let total=0;for(const e of valid)total+=e.weight;
+  let r=Math.random()*total;
+  for(const e of valid){r-=e.weight;if(r<=0)return e;}
+  return valid[valid.length-1];
+}
+function rememberEvent(id){
+  // Память — набор из девяти РАЗНЫХ событий: если событие вернулось раньше
+  // срока (узкий слой), оно переезжает в начало, а не добавляется вторым.
+  // Иначе дубликаты вытесняли бы другие записи, набор худел, и повторы
+  // начинались бы чаще, чем задумано.
+  const seen=recentEvents.indexOf(id);
+  if(seen>=0)recentEvents.splice(seen,1);
+  recentEvents.unshift(id);
+  while(recentEvents.length>EVENT_MEMORY)recentEvents.pop();
+}
+function triggerEvent(){
+  const ev=pickEvent();if(!ev)return;
+  currentEvent=ev.id;currentEvent_label=ev.label;
+  eventDuration=rnd(8,22);eventAge=0;eventData={};
+  if(ev.setup)ev.setup();
+  const needsActor=['ambulance','chase','parade','crash','biker','robber','cat','dogWalk','lovers','drone','helicopter'].includes(ev.id);
+  if(needsActor){
+    const hasActor=Object.values(eventData).some(v=>v!==null&&v!==undefined&&v!==false&&v!==0);
+    if(!hasActor){
+      // Событие не собралось — актёра не нашлось на занятой улице. В памяти
+      // его не держим: иначе слот сгорит на том, чего зритель не увидел, и
+      // настоящее событие вернётся раньше срока.
+      endEvent();eventTimer=rnd(5,10);
+      return;
+    }
+  }
+  rememberEvent(ev.id);
+}
+function endEvent(){
+  for(let i=cars.length-1;i>=0;i--)if(cars[i].eventTag)cars.splice(i,1);
+  for(let i=people.length-1;i>=0;i--)if(people[i].eventTag)people.splice(i,1);
+  for(const cc of cars){cc.isManagedByEvent=false;cc.brakeSmooth=1;cc.braking=false;}
+  for(const p of people){p.hitCooldown=0;p.frozen=false;p.escapeMode='idle';p.thawTimer=0;}
+  blackoutT=Math.min(blackoutT,0.3);
+  if(weather==='storm')weatherTimer=Math.min(weatherTimer,10);
+  currentEvent=null;currentEvent_label='';eventDuration=0;eventAge=0;eventData={};
+}
+
+// ===== ФИЗИКА =====
+function updateFx(dt){
+  for(let i=fx.particles.length-1;i>=0;i--){
+    const p=fx.particles[i];
+    p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=200*dt;p.life-=dt;
+    if(p.life<=0)fx.particles.splice(i,1);
+  }
+  for(let i=fx.flashes.length-1;i>=0;i--){
+    const f=fx.flashes[i];f.life-=dt;
+    if(f.life<=0)fx.flashes.splice(i,1);
+  }
+  for(let i=fx.meteors.length-1;i>=0;i--){
+    const m=fx.meteors[i];
+    m.x+=m.vx*dt;m.y+=m.vy*dt;m.life-=dt;
+    if(m.life<=0||m.y>HORIZON+20)fx.meteors.splice(i,1);
+  }
+  for(let i=splashes.length-1;i>=0;i--){
+    const s=splashes[i];s.life-=dt;
+    s.r+=(s.maxR-s.r)*dt*6;
+    if(s.life<=0)splashes.splice(i,1);
+  }
+}
+
+function updateWindows(dt){
+  const n=nightAmt();
+  if(n<0.3)return;
+  for(const h of houses){
+    for(const w of h.windows){
+      w.dim+=(w.targetDim-w.dim)*Math.min(1,dt*0.5);
+    }
+    h._winTimer-=dt;
+    if(h._winTimer<=0){
+      const w=h.windows[Math.random()*h.windows.length|0];
+      w.on=!w.on;
+      w.targetDim=w.on?1:0.05;
+      w.tvFlicker=w.on&&Math.random()<0.15;
+      h._winTimer=rnd(15,90);
+    }
+  }
+}
+function updateBirds(dt){
+  const n=nightAmt();
+  const active=n<0.7;
+  for(const b of birds){
+    if(active){
+      b.x+=b.dir*b.speed*dt;
+      b.flapPhase+=b.flapFreq*0.15;
+    }
+    const sag=(1-Math.abs(Math.sin(b.flapPhase*TAU)))*3;
+    b.y=b.yBase+sag;
+    if(b.x<-150||b.x>W+150){
+      b.x=b.dir===1?-100:W+100;
+      b.yBase=rnd(40,HORIZON*0.5);
+    }
+  }
+}
+function updatePigeons(dt){
+  const n=nightAmt();
+  if(n>0.6)return;
+  for(const p of pigeons){
+    if(p.flying){
+      p.flyY+=p.flyV;p.flyV+=0.05;
+      p.x+=p.dir*60*dt;
+      p.flyV*=0.98;
+      if(p.flyY>0){p.flying=false;p.flyY=0;}
+      continue;
+    }
+    p.timer-=dt;
+    if(p.timer<0){
+      p.moving=!p.moving;
+      p.dir=coin()?-1:1;
+      p.timer=rnd(2,6);
+    }
+    for(const pp of people){
+      const range=pp.isDog?60:30;
+      if(Math.abs(pp.x-p.x)<range && Math.abs(pp.y-p.y)<20 && !p.flying){
+        p.flying=true;p.flyY=0;p.flyV=rnd(-3,-1.5);
+        p.dir=pp.x>p.x?-1:1;
+      }
+    }
+    for(const car of cars){
+      const dx=car.x-p.x,dy=car.y-p.y;
+      if(Math.abs(dx)<100&&Math.abs(dy)<50&&!p.flying){
+        p.flying=true;p.flyY=0;p.flyV=rnd(-3,-1.5);
+        p.dir=dx>0?-1:1;
+      }
+    }
+    if(p.moving){
+      p.x+=p.dir*20*dt;
+      if(p.x<30||p.x>W-30)p.dir*=-1;
+    }
+  }
+}
+
+function drawFx(ctx){
+  if(rainStrength>0.3){
+    for(const s of splashes){
+      const a=s.life/s.maxLife;
+      ctx.strokeStyle=`rgba(200,220,255,${a*0.5*rainStrength})`;
+      ctx.lineWidth=1;
+      ctx.beginPath();ctx.ellipse(s.x,s.y,s.r,s.r*0.35,0,0,TAU);ctx.stroke();
+    }
+  }
+  for(const m of fx.meteors){
+    if(m.y>HORIZON)continue;
+    const alpha=Math.min(1,m.life/m.maxLife);
+    const len=m.len*alpha;
+    const dir=Math.atan2(m.vy,m.vx);
+    const tailX=m.x-Math.cos(dir)*len,tailY=m.y-Math.sin(dir)*len;
+    const g=ctx.createLinearGradient(m.x,m.y,tailX,tailY);
+    g.addColorStop(0,`rgba(255,255,255,${alpha})`);
+    g.addColorStop(0.3,`rgba(180,220,255,${alpha*0.6})`);
+    g.addColorStop(1,'rgba(180,220,255,0)');
+    ctx.strokeStyle=g;ctx.lineWidth=m.big?3:1.5;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(m.x,m.y);ctx.lineTo(tailX,tailY);ctx.stroke();
+    ctx.beginPath();ctx.arc(m.x,m.y,m.big?4:2,0,TAU);
+    ctx.fillStyle=`rgba(255,255,255,${alpha})`;ctx.fill();
+  }
+  for(const f of fx.flashes){
+    const a=f.life/f.maxLife;
+    const dx=f.dx?f.dx*(1-a):0;
+    const dy=f.dy?f.dy*(1-a):0;
+    const px=f.x+dx,py=f.y+dy;
+    const g1=ctx.createRadialGradient(px,py,0,px,py,60);
+    g1.addColorStop(0,`rgba(255,100,100,${a*0.7})`);
+    g1.addColorStop(1,'rgba(255,100,100,0)');
+    ctx.fillStyle=g1;ctx.fillRect(px-60,py-60,120,120);
+    const g2=ctx.createRadialGradient(px,py,0,px,py,20);
+    g2.addColorStop(0,`rgba(255,255,255,${a})`);
+    g2.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=g2;ctx.fillRect(px-20,py-20,40,40);
+  }
+  for(const p of fx.particles){
+    const a=p.life/p.maxLife;
+    ctx.globalAlpha=a;
+    ctx.fillStyle=p.color;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.size*a,0,TAU);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+// ===== НЕБО =====
+function skyColor(){
+  const n=nightAmt(),moodShift=mood-0.5;
+  const phases=[
+    {p:0,top:[2,3,12],bot:[10,10,26]},
+    {p:0.20,top:[35,20,50],bot:[110,55,80]},
+    {p:0.25,top:[90,50,70],bot:[255,140,90]},
+    {p:0.35,top:[70,120,200],bot:[200,220,240]},
+    {p:0.50,top:[90,150,220],bot:[210,225,240]},
+    {p:0.65,top:[70,120,200],bot:[230,180,120]},
+    {p:0.75,top:[180,80,60],bot:[255,140,80]},
+    {p:0.85,top:[50,30,70],bot:[120,55,90]},
+    {p:1,top:[2,3,12],bot:[10,10,26]}
+  ];
+  let a=phases[0],b=phases[phases.length-1];
+  for(let i=0;i<phases.length-1;i++){
+    if(dayT>=phases[i].p&&dayT<=phases[i+1].p){a=phases[i];b=phases[i+1];break;}
+  }
+  const k=(dayT-a.p)/((b.p-a.p)||1);
+  const c1=a.top.map((v,i)=>clamp(Math.round(lerp(v,b.top[i],k)+(i===0?moodShift*30:i===2?-moodShift*20:0)),0,255));
+  const c2=a.bot.map((v,i)=>clamp(Math.round(lerp(v,b.bot[i],k)+(i===0?moodShift*25:i===2?-moodShift*15:0)),0,255));
+  return {top:`rgb(${c1[0]},${c1[1]},${c1[2]})`,bot:`rgb(${c2[0]},${c2[1]},${c2[2]})`,n};
+}
+
+// ===== ЗАПЕЧЁННЫЕ СЛОИ =====
+// Небо и туман — это градиент на пол-кадра, два десятка облаков и звёзды:
+// вместе они стоят почти треть кадра, хотя меняются еле заметно. Такие слои
+// рисуются в отдельный холст раз в несколько кадров, а в кадр попадают одной
+// картинкой. Облака за это время сдвигаются на десятые доли пикселя, звёзды
+// мерцают теми же синусами — на глаз это тот же живой кадр.
+const bakes={};
+function baked(name,age,h,paint){
+  const hh=Math.max(1,Math.ceil(h));
+  let b=bakes[name];
+  if(!b||b.cv.height!==hh){
+    const cv=document.createElement('canvas');
+    cv.width=W;cv.height=hh;
+    b=bakes[name]={cv,g:cv.getContext('2d'),age:1e9};
+  }
+  b.age++;
+  if(b.age>age){
+    b.age=0;
+    b.g.clearRect(0,0,W,hh);
+    // Подменяем холст: те же рисующие функции кладут картинку в слой.
+    const was=x;
+    x=b.g;
+    paint(b.g);
+    x=was;
+  }
+  return b.cv;
+}
+
+// Улица пересобралась — слои пора печь заново, иначе на смене трека в кадре
+// на миг останется прошлый квартал.
+function freshBakes(){
+  for(const name in bakes)bakes[name].age=1e9;
+}
+
+// Подложка улицы — небо с облаками, зарево города, земля, деревья и дома.
+// Это сотни операций рисования, и Skia платит за каждую при чтении пикселей
+// в эфир. Собираем их в один слой раз в два десятка кадров, а в кадр кладём
+// одной картинкой. Всё, что в подложке движется (облака, окна, огни), за это
+// время сдвигается на доли пикселя — на глаз кадр тот же, а пересборка реже
+// дёргает кадр.
+function drawBackdrop(){
+  x.drawImage(baked('street',20,ROAD_TOP,()=>{
+    drawSky();
+    // Радуга — часть неба, поэтому живёт в подложке и рисуется до домов:
+    // низ арки прячут крыши, и видно только то, что камера захватила над
+    // домами. Как событие она по-прежнему выпадает и держится своим таймером.
+    drawRainbow();
+    drawCityGlow();
+    drawGround();
+    drawTrees();
+    drawHouses();
+    // Ночная вуаль — сплошная плёнка на пол-кадра: в кадре она стоила бы
+    // столько же, сколько всё остальное небо, а так живёт в слое.
+    drawNightVeil();
+  }),0,0);
+}
+
+function drawRainbow(){
+  if(currentEvent!=='rainbow')return;
+  if(season==='winter')return;
+  if(nightAmt()>0.5)return;
+  if(rainStrength>0.35)return;
+  const a=Math.min(1,eventData.rainbowT*0.5)*(1-Math.max(0,(eventData.rainbowT-15)/5));
+  if(a<0.05)return;
+  // Арка с центром ниже кадра: её верх поднимается выше крыш, а низ уходит за
+  // горизонт, где его закрывают дома.
+  const r=W*0.42,cy=H*0.16+r;
+  x.save();
+  x.globalAlpha=a*0.45;
+  for(let i=0;i<7;i++){
+    x.strokeStyle=`hsl(${i*50},75%,62%)`;
+    x.lineWidth=5;
+    x.beginPath();
+    x.arc(W/2,cy,r-i*7,Math.PI,TAU);
+    x.stroke();
+  }
+  x.restore();
+}
+
+function drawSky(){
+  const sk=skyColor();
+  const sg=x.createLinearGradient(0,0,0,HORIZON);
+  sg.addColorStop(0,sk.top);sg.addColorStop(1,sk.bot);
+  x.fillStyle=sg;x.fillRect(0,0,W,HORIZON);
+
+  const cloudCover=weather==='storm'?1:weather==='rain'?0.85:fogStrength*0.8;
+  if(sk.n>0.2 && cloudCover<0.5){
+    x.globalAlpha=sk.n*0.9*Math.max(0,1-cloudCover*2);
+    for(const s of stars){
+      const tw=0.4+0.6*Math.sin(t*s.sp+s.tw);
+      x.fillStyle=`rgba(${s.color},${tw})`;
+      x.fillRect(s.x,s.y,s.s,s.s);
+    }
+    x.globalAlpha=1;
+  }
+
+  for(const cl of clouds){
+    cl.x+=cl.speed*0.01*(0.4+cl.layer*0.5);
+    if(cl.x>W+cl.w)cl.x=-cl.w;
+    const grad=x.createLinearGradient(cl.x,cl.y,cl.x,cl.y+cl.h);
+    let cloudDark=1.0,cloudR=180,cloudG=190,cloudB=220;
+    if(weather==='rain'){cloudDark=0.5;cloudR=100;cloudG=110;cloudB=130;}
+    else if(weather==='storm'){cloudDark=0.9;cloudR=25;cloudG=28;cloudB=40;}
+    const ca=cl.a*cloudDark*(1-sk.n*0.7)*(0.6+mood*0.4)*1.5;
+    if(ca<=0.01)continue;
+    grad.addColorStop(0,`rgba(${cloudR},${cloudG},${cloudB},${Math.min(ca,0.9)*0.6})`);
+    grad.addColorStop(1,`rgba(${cloudR},${cloudG},${cloudB},0)`);
+    x.fillStyle=grad;
+    x.beginPath();x.ellipse(cl.x,cl.y,cl.w,cl.h,0,0,TAU);x.fill();
+  }
+
+  if(dayT>0.22&&dayT<0.80){
+    const angle=(dayT-0.25)*TAU;
+    const sunX=W*0.5+Math.cos(angle-Math.PI/2)*W*0.4;
+    const sunY=HORIZON*0.55-Math.sin(angle-Math.PI/2)*HORIZON*0.5;
+    const sgl=x.createRadialGradient(sunX,sunY,4,sunX,sunY,200);
+    sgl.addColorStop(0,'rgba(255,245,210,0.95)');
+    sgl.addColorStop(0.25,'rgba(255,210,140,0.30)');
+    sgl.addColorStop(1,'rgba(255,180,90,0)');
+    x.fillStyle=sgl;x.beginPath();x.arc(sunX,sunY,200,0,TAU);x.fill();
+    x.beginPath();x.arc(sunX,sunY,32,0,TAU);
+    x.fillStyle='rgba(255,250,225,0.95)';x.fill();
+  }
+  if(dayT<0.24||dayT>0.78){
+    const angle=(dayT+0.25)*TAU;
+    const mx=W*0.5+Math.cos(angle-Math.PI/2)*W*0.35;
+    const my=HORIZON*0.55-Math.sin(angle-Math.PI/2)*HORIZON*0.5;
+    const mgl=x.createRadialGradient(mx,my,4,mx,my,140);
+    mgl.addColorStop(0,'rgba(220,230,255,0.9)');
+    mgl.addColorStop(0.3,'rgba(180,200,255,0.22)');
+    mgl.addColorStop(1,'rgba(180,200,255,0)');
+    x.fillStyle=mgl;x.beginPath();x.arc(mx,my,140,0,TAU);x.fill();
+    x.beginPath();x.arc(mx,my,22,0,TAU);x.fillStyle='#eef3ff';x.fill();
+  }
+  x.fillStyle=sk.bot;x.fillRect(0,HORIZON,W,BG_BOT-HORIZON);
+}
+
+function drawGround(){
+  const n=nightAmt();
+  const g=x.createLinearGradient(0,BG_BOT-8,0,ROAD_TOP+4);
+  const baseR=Math.round(lerp(60,20,n));
+  g.addColorStop(0,`rgb(${baseR-8},${baseR},${baseR-8})`);
+  g.addColorStop(1,`rgb(${baseR},${baseR+4},${baseR-4})`);
+  x.fillStyle=g;
+  x.fillRect(0,BG_BOT-8,W,ROAD_TOP-BG_BOT+14);
+
+  if(n>0.3){
+    for(const h of houses){
+      if(h.layer>1)continue;
+      const par=h.layer*0.08;
+      const gazePull=(gazeX-W/2)*par*0.02;
+      const hx=h.x-h.w/2+gazePull;
+      const litWindows=h.windows.filter(w=>w.on).length;
+      if(!litWindows)continue;
+      const cx=hx+h.w/2;
+      const litRatio=litWindows/h.windows.length;
+      const depthMul=1+(2-h.layer)*0.3;
+      const gg=x.createRadialGradient(cx,BG_BOT+4,4,cx,BG_BOT+4,h.w*0.7*depthMul);
+      gg.addColorStop(0,`rgba(255,180,100,${0.14*n*litRatio})`);
+      gg.addColorStop(1,'rgba(255,180,100,0)');
+      x.fillStyle=gg;
+      x.fillRect(cx-h.w*0.7*depthMul,BG_BOT-4,h.w*1.4*depthMul,20);
+    }
+  }
+}
+
+function drawCityGlow(){
+  const n=nightAmt();if(n<0.2)return;
+  const g=x.createLinearGradient(0,HORIZON-80,0,HORIZON+50);
+  const warm=0.15+mood*0.15;
+  g.addColorStop(0,'rgba(255,180,120,0)');
+  g.addColorStop(0.6,`rgba(255,170,100,${warm*n})`);
+  g.addColorStop(1,'rgba(255,160,90,0)');
+  x.fillStyle=g;x.fillRect(0,HORIZON-80,W,130);
+}
+
+function drawBillboard(hx,hy,w,layer){
+  const n=nightAmt();
+  const perspective=1-layer*0.18;
+  const bw=Math.min(w*1.4,110)*perspective;
+  const bh=20*perspective;
+  const bx=hx+w/2-bw/2;
+  const by=hy-bh-8*perspective;
+  const oporaH=14*perspective;
+
+  x.fillStyle='#08080c';
+  x.fillRect(bx+bw*0.2,hy-oporaH,3*perspective,oporaH);
+  x.fillRect(bx+bw*0.8-3*perspective,hy-oporaH,3*perspective,oporaH);
+  x.fillStyle='#0b0b14';x.fillRect(bx,by,bw,bh);
+  x.strokeStyle='rgba(80,80,100,0.5)';x.lineWidth=1;
+  x.strokeRect(bx+0.5,by+0.5,bw-1,bh-1);
+
+  const lit=blackoutT<0.5?1:0.15;
+  const brightness=(0.75+0.1*Math.sin(t*0.8))*lit;
+  x.font=`bold ${Math.max(8,11*perspective)}px monospace`;
+  x.textAlign='center';
+  // Подсветка вывески — с наступлением темноты: днём она просто тёмная доска.
+  if(lit>0.5&&n>0.15){x.shadowColor='rgba(255,120,180,0.7)';x.shadowBlur=8;}
+  x.fillStyle=`rgba(255,200,230,${brightness})`;
+  x.fillText(BRAND.name,bx+bw/2,by+13*perspective);
+  x.shadowBlur=0;x.shadowColor='transparent';
+  x.font=`${Math.max(6,6*perspective)}px monospace`;
+  x.fillStyle=`rgba(180,200,230,${0.5*brightness})`;
+  x.fillText(BRAND.url,bx+bw/2,by+18*perspective);
+  x.textAlign='left';
+
+  if(n>0.3&&lit>0.5){
+    const glow=x.createRadialGradient(bx+bw/2,by+bh,5,bx+bw/2,by+bh,60*perspective);
+    glow.addColorStop(0,`rgba(255,120,180,${0.15*n})`);
+    glow.addColorStop(1,'rgba(255,120,180,0)');
+    x.fillStyle=glow;x.fillRect(bx-40,by-20,bw+80,bh+60);
+  }
+}
+
+// Свечение окна — это был радиальный градиент на каждое окно: триста с лишним
+// градиентов и столько же заливок за кадр, почти двадцать миллисекунд. Теперь
+// спрайт 64x64 рисуется один раз, а окно получает его картинкой с нужной
+// прозрачностью. Внешне не отличается, стоит в тридцать раз дешевле.
+let glowWarm=null,glowCold=null;
+function windowGlow(warm){
+  const cached=warm?glowWarm:glowCold;
+  if(cached)return cached;
+  const cv=document.createElement('canvas');
+  cv.width=64;cv.height=64;
+  const g=cv.getContext('2d');
+  const rg=g.createRadialGradient(32,32,0,32,32,32);
+  const hue=warm?'255,200,120':'150,200,255';
+  rg.addColorStop(0,`rgba(${hue},1)`);
+  rg.addColorStop(1,`rgba(${hue},0)`);
+  g.fillStyle=rg;g.fillRect(0,0,64,64);
+  if(warm)glowWarm=cv;else glowCold=cv;
+  return cv;
+}
+
+function drawHouses(){
+  const n=nightAmt();
+  const sorted=houses.slice().sort((a,b)=>a.layer-b.layer);
+  const warmLit='#ffdc8c',coldLit='#b4dcff';
+  const darkWin=`rgba(${30+50*n|0},${35+50*n|0},${55+50*n|0},0.85)`;
+  for(const h of sorted){
+    const par=h.layer*0.08;
+    const gazePull=(gazeX-W/2)*par*0.02;
+    const hx=h.x-h.w/2+gazePull;
+    const hy=HORIZON-h.h-h.layer*6;
+    const atmo=1-h.layer*0.18;
+    const base=Math.round(lerp(72,18,n)*h.shade*atmo+20);
+
+    const houseBottom=hy+h.h;
+    const fundBottom=BG_BOT+h.layer*2;
+    if(fundBottom>houseBottom){
+      x.fillStyle=`rgb(${base-10},${base-10},${base-6})`;
+      x.fillRect(hx,houseBottom,h.w,fundBottom-houseBottom);
+    } else {
+      x.fillStyle=`rgb(${base-12},${base-12},${base-8})`;
+      x.fillRect(hx,houseBottom,h.w,2);
+    }
+
+    x.fillStyle=`rgb(${base},${base},${base+8})`;
+    x.fillRect(hx,hy,h.w,h.h);
+
+    x.beginPath();
+    x.moveTo(hx-6,hy);x.lineTo(hx+h.w/2,hy-h.roofH);x.lineTo(hx+h.w+6,hy);
+    x.closePath();
+    x.fillStyle=`rgb(${base-8},${base-8},${base-2})`;x.fill();
+
+    if(h.hasSpire){
+      x.fillStyle=`rgb(${base-10},${base-10},${base-6})`;
+      x.fillRect(hx+h.w/2-2,hy-h.roofH-20,4,20);
+    }
+    // Вывеска канала висит на доме всегда: днём тёмная доска, ночью светится.
+    if(h.hasBillboard)drawBillboard(hx,hy-h.roofH,h.w,h.layer);
+    if(h.hasAwning){
+      x.fillStyle=`rgb(${base-15},${base-10},${base-5})`;
+      x.fillRect(hx+h.w*0.3,hy+h.h*0.55,h.w*0.4,4);
+    }
+
+    // Окна: цвет ставим один раз на группу (тёплые/холодные/погасшие), а
+    // яркость гоняем через globalAlpha — это дешевле, чем строка цвета на
+    // каждое окно.
+    let curTone=-1;
+    for(const w of h.windows){
+      const wx=hx+w.u*h.w,wy=hy+w.v*h.h;
+      let lit=0;
+      if(n>0.3 && w.targetDim>0.5 && blackoutT<0.5){
+        if(w.tvFlicker){
+          lit=0.85+0.15*Math.sin(t*w.flickerSpeed+w.phase);
+          if(Math.sin(t*8+w.phase)>0.7)lit*=0.7;
+        } else {
+          lit=0.95+0.05*Math.sin(t*0.15+w.phase);
+        }
+      } else {
+        lit=w.dim*0.3;
+      }
+      if(lit>0.15){
+        const tone=w.warm?0:1;
+        if(tone!==curTone){x.fillStyle=w.warm?warmLit:coldLit;curTone=tone;}
+        x.globalAlpha=lit;
+        x.fillRect(wx,wy,6,8);
+        if(n>0.4&&lit>0.5){
+          x.globalAlpha=0.35*n*atmo*lit;
+          x.drawImage(windowGlow(w.warm),wx-24,wy-24,58,58);
+        }
+      } else {
+        if(curTone!==2){x.fillStyle=darkWin;curTone=2;}
+        x.fillRect(wx,wy,6,8);
+      }
+    }
+    x.globalAlpha=1;
+  }
+}
+
+function drawTrees(){
+  const n=nightAmt();
+  for(const tr of trees){
+    const windMul=1+rainStrength*1.5+stormStrength*2;
+    const sway=Math.sin(t*0.7+tr.sway)*3*windMul;
+    const base=Math.round(lerp(64,15,n)*tr.shade+10);
+    const baseY=BG_BOT+tr.baseYOffset;
+    x.fillStyle=`rgb(${base},${base+15},${base})`;
+    x.fillRect(tr.x-2,baseY-tr.size*0.6,4,tr.size*0.6);
+    x.strokeStyle=`rgb(${base},${base+15},${base})`;
+    x.lineWidth=1.5;
+    x.beginPath();
+    x.moveTo(tr.x,baseY-tr.size*0.35);
+    x.lineTo(tr.x-6+sway*0.5,baseY-tr.size*0.5);
+    x.moveTo(tr.x,baseY-tr.size*0.4);
+    x.lineTo(tr.x+6+sway*0.5,baseY-tr.size*0.55);
+    x.stroke();
+    for(let i=0;i<tr.layers;i++){
+      const cx=tr.x+sway+Math.cos(i*1.7)*tr.size*0.25;
+      const cy=baseY-tr.size*0.4-i*tr.size*0.10;
+      const r=tr.size*0.28*(1-i*0.08);
+      x.beginPath();x.arc(cx,cy+2,r,0,TAU);
+      x.fillStyle=`rgb(${base-6},${base+8},${base-4})`;x.fill();
+      x.beginPath();x.arc(cx,cy,r,0,TAU);
+      x.fillStyle=`rgb(${base},${base+15},${base})`;x.fill();
+    }
+  }
+}
+
+function drawRoad(){
+  const n=nightAmt();
+  const base=Math.round(lerp(78,26,n));
+  const wet=rainStrength*0.85;
+  const g=x.createLinearGradient(0,ROAD_TOP,0,H);
+  const r=Math.round((base-12)*(1-wet*0.3));
+  const g2=Math.round((base+5)*(1-wet*0.3));
+  g.addColorStop(0,`rgb(${r},${r},${r-6})`);
+  g.addColorStop(1,`rgb(${g2},${g2},${g2+8})`);
+  x.fillStyle=g;x.fillRect(0,ROAD_TOP,W,H-ROAD_TOP);
+
+  x.fillStyle='rgb(140,140,150)';
+  x.fillRect(0,ROAD_TOP-3,W,3);
+
+  x.fillStyle=`rgb(${base+28},${base+28},${base+30})`;
+  x.fillRect(0,ROAD_TOP-10,W,7);
+
+  const centerY=(ROAD_TOP+H)/2;
+  const dashCount=18;
+  const dashW=W/dashCount*0.5;
+  x.fillStyle=`rgba(255,220,80,${(0.85-n*0.3)*(1-wet*0.4)})`;
+  for(let i=0;i<dashCount;i++){
+    x.fillRect(i*(W/dashCount)+dashW*0.25,centerY,dashW,4);
+  }
+  x.fillStyle=`rgba(220,220,220,${0.55-n*0.2})`;
+  x.fillRect(0,ROAD_TOP+2,W,1.5);
+
+  const reflectAmt=rainStrength*(0.5+n*0.5)*(1-blackoutT*0.7);
+  if(reflectAmt>0.1){
+    x.globalAlpha=reflectAmt*0.4;
+    for(const L of lamps){
+      if(blackoutT>0.5)continue;
+      const ripple=Math.sin(t*3+L.phase)*8;
+      const grad=x.createRadialGradient(L.x,ROAD_TOP+60,4,L.x,ROAD_TOP+60+ripple,180*GLOW_K);
+      grad.addColorStop(0,'rgba(255,220,140,0.6)');
+      grad.addColorStop(1,'rgba(255,220,140,0)');
+      x.fillStyle=grad;
+      x.beginPath();x.ellipse(L.x,ROAD_TOP+90+ripple*0.5,140*GLOW_K,(40+ripple*0.3)*GLOW_K,0,0,TAU);x.fill();
+    }
+    if(billboardHouse && blackoutT<0.5){
+      const h=billboardHouse;
+      const par=h.layer*0.08;
+      const gazePull=(gazeX-W/2)*par*0.02;
+      const bbX=h.x-h.w/2+gazePull+h.w/2;
+      const grad=x.createRadialGradient(bbX,ROAD_TOP+40,4,bbX,ROAD_TOP+40,120*GLOW_K);
+      grad.addColorStop(0,'rgba(255,120,180,0.35)');
+      grad.addColorStop(1,'rgba(255,120,180,0)');
+      x.fillStyle=grad;
+      x.beginPath();x.ellipse(bbX,ROAD_TOP+60,100*GLOW_K,26*GLOW_K,0,0,TAU);x.fill();
+    }
+    x.globalAlpha=1;
+  }
+}
+
+function drawLamps(){
+  const n=nightAmt();
+  const wireAlpha=0.15+n*0.35;
+  x.strokeStyle=`rgba(20,20,30,${wireAlpha})`;
+  x.lineWidth=1;
+  for(let i=0;i<lamps.length-1;i++){
+    const a=lamps[i],b=lamps[i+1];
+    if(a.broken || b.broken)continue;
+    x.beginPath();
+    x.moveTo(a.x+16,ROAD_TOP-155);
+    x.quadraticCurveTo((a.x+b.x)/2+16,ROAD_TOP-143,b.x+16,ROAD_TOP-155);
+    x.stroke();
+  }
+
+  for(const L of lamps){
+    if(blackoutT>0.5)continue;
+    let flick;
+    if(L.broken){
+      flick=((t*0.5+L.flickerSeed)%2.5)<0.15?1:0;
+    } else {
+      flick=0.85+0.15*Math.sin(t*L.pulse+L.phase);
+    }
+    const a=n*flick*(1-blackoutT*0.9);
+    const poleAlpha=Math.max(a,0.55*(1-n*0.3));
+    x.fillStyle=`rgba(15,15,25,${poleAlpha})`;
+    x.fillRect(L.x-2,ROAD_TOP-160,4,160);
+    x.fillRect(L.x-2,ROAD_TOP-160,18,3);
+    if(a<=0.02)continue;
+    // Свечи фонарей — самая дорогая часть кадра: это два больших мягких
+    // градиента на каждый фонарь, и в 720p они стоят около двадцати
+    // миллисекунд. Радиусы заданы в пикселях 720p, поэтому на меньшем кадре
+    // приводим их к его высоте: иначе свеча занимает пол-экрана и по площади,
+    // и по цене.
+    const gr=GLOW_K;
+    x.beginPath();x.arc(L.x+16,ROAD_TOP-160,5,0,TAU);
+    x.fillStyle=`rgba(255,240,180,${a})`;x.fill();
+    const g=x.createRadialGradient(L.x+16,ROAD_TOP-160,4,L.x+16,ROAD_TOP-160,220*gr);
+    g.addColorStop(0,`rgba(255,220,140,${0.32*a})`);
+    g.addColorStop(0.4,`rgba(255,200,100,${0.10*a})`);
+    g.addColorStop(1,'rgba(255,200,100,0)');
+    x.fillStyle=g;x.beginPath();x.arc(L.x+16,ROAD_TOP-160,220*gr,0,TAU);x.fill();
+    const gp=x.createRadialGradient(L.x+16,ROAD_TOP+70*gr,4,L.x+16,ROAD_TOP+70*gr,150*gr);
+    gp.addColorStop(0,`rgba(255,220,140,${0.22*a})`);
+    gp.addColorStop(1,'rgba(255,220,140,0)');
+    x.fillStyle=gp;x.beginPath();x.ellipse(L.x+16,ROAD_TOP+80*gr,130*gr,36*gr,0,0,TAU);x.fill();
+  }
+}
+
+function drawBenches(){
+  for(const b of benches){
+    x.fillStyle='rgba(0,0,0,0.3)';
+    x.beginPath();x.ellipse(b.x,b.y+4,22,4,0,0,TAU);x.fill();
+    x.fillStyle='rgba(40,32,25,0.9)';
+    x.fillRect(b.x-20,b.y-2,40,4);
+    x.fillStyle='rgba(120,100,80,0.7)';
+    x.fillRect(b.x-20,b.y-3,40,1.5);
+    x.fillStyle='rgba(40,32,25,0.9)';
+    x.fillRect(b.x-18,b.y-12,36,3);
+    x.fillStyle='rgba(120,100,80,0.7)';
+    x.fillRect(b.x-18,b.y-13,36,1.5);
+    x.fillStyle='rgba(40,32,25,0.9)';
+    x.fillRect(b.x-18,b.y-12,2,12);
+    x.fillRect(b.x+16,b.y-12,2,12);
+  }
+}
+
+function drawProps(){
+  for(const p of props){
+    if(p.type==='sign'){
+      x.fillStyle='rgba(0,0,0,0.35)';
+      x.beginPath();x.ellipse(p.x,p.y+2,5,2,0,0,TAU);x.fill();
+      x.fillStyle='rgba(40,40,50,0.9)';
+      x.fillRect(p.x-1.5,p.y-40,3,40);
+      x.fillStyle=p.signColor;
+      x.fillRect(p.x-9,p.y-55,18,18);
+      x.fillStyle='#fff';x.font='bold 12px monospace';x.textAlign='center';
+      x.fillText(p.signColor==='#c02828'?'!':'P',p.x,p.y-42);
+      x.textAlign='left';
+    } else {
+      x.fillStyle='rgba(0,0,0,0.35)';
+      x.beginPath();x.ellipse(p.x,p.y+2,8,3,0,0,TAU);x.fill();
+      x.fillStyle='rgba(50,55,60,0.9)';
+      x.beginPath();x.ellipse(p.x,p.y,7,3,0,0,TAU);x.fill();
+      const fillH=10+p.filled*6;
+      x.fillRect(p.x-6,p.y-fillH,12,fillH);
+      x.fillStyle='rgba(30,32,38,0.9)';
+      x.fillRect(p.x-7,p.y-fillH-2,14,3);
+    }
+  }
+}
+
+function drawLampShadows(){
+  const n=nightAmt();
+  if(n<0.3||blackoutT>0.3)return;
+  for(const L of lamps){
+    const lightX=L.x+16,lightY=ROAD_TOP-160;
+    for(const car of cars){
+      const dist=Math.hypot(car.x-lightX,car.y-lightY);
+      if(dist>220)continue;
+      const lightFalloff=1-dist/220;
+      const dx=car.x-lightX,dy=car.y-lightY;
+      const len=Math.hypot(dx,dy)||1;
+      const shadowLen=car.h*(Math.abs(dy)/160)*0.8;
+      const shadowX=car.x+dx/len*shadowLen;
+      const shadowY=car.y+Math.max(0,dy)*0.02;
+      x.fillStyle=`rgba(0,0,0,${0.35*n*lightFalloff*(1-blackoutT)})`;
+      x.beginPath();x.ellipse(shadowX,shadowY+car.h*0.4,car.w*0.55,car.h*0.25,0,0,TAU);x.fill();
+    }
+    for(const p of people){
+      const dist=Math.hypot(p.x-lightX,p.y-lightY);
+      if(dist>220)continue;
+      const lightFalloff=1-dist/220;
+      const dx=p.x-lightX,dy=p.y-lightY;
+      const len=Math.hypot(dx,dy)||1;
+      const timeStretch=1+Math.sin((dayT-0.25)*TAU)*0.5;
+      const shadowLen=p.h*0.9*timeStretch;
+      const shadowX=p.x+p.sideStep+dx/len*shadowLen;
+      const shadowY=p.y+Math.max(0,dy)*0.015;
+      const shadowW=p.h*0.35;
+      x.fillStyle=`rgba(0,0,0,${0.4*n*lightFalloff*(1-blackoutT)})`;
+      x.beginPath();x.ellipse(shadowX,shadowY+p.h*0.5,shadowW,p.h*0.10,0,0,TAU);x.fill();
+      if(p.umbrella){
+        x.beginPath();
+        x.ellipse(shadowX,shadowY+p.h*0.35,shadowW*1.8,p.h*0.08,0,0,TAU);
+        x.fill();
+      }
+    }
+  }
+}
+
+function drawMoto(car){
+  const cx=car.x,cy=car.y,n=nightAmt();
+  x.fillStyle='rgba(0,0,0,0.4)';
+  x.beginPath();x.ellipse(cx,cy+10,26,4,0,0,TAU);x.fill();
+  x.fillStyle='#0a0a0a';
+  x.beginPath();x.arc(cx-14,cy+8,7,0,TAU);x.fill();
+  x.beginPath();x.arc(cx+14,cy+8,7,0,TAU);x.fill();
+  x.strokeStyle='rgba(120,120,120,0.6)';x.lineWidth=1;
+  for(const wx of [cx-14,cx+14]){
+    for(let i=0;i<4;i++){
+      const a=car.wheelAngle+i*Math.PI/4;
+      x.beginPath();
+      x.moveTo(wx,cy+8);
+      x.lineTo(wx+Math.cos(a)*6,cy+8+Math.sin(a)*6);
+      x.stroke();
+    }
+  }
+  x.strokeStyle=car.color;x.lineWidth=3;
+  x.beginPath();
+  x.moveTo(cx-14,cy+8);x.lineTo(cx-2,cy-6);x.lineTo(cx+12,cy-2);x.lineTo(cx+14,cy+8);
+  x.stroke();
+  x.fillStyle='#1a1a1a';x.fillRect(cx-6,cy-8,12,4);
+  x.strokeStyle='#222';x.lineWidth=2;
+  x.beginPath();x.moveTo(cx+8,cy-10);x.lineTo(cx+16,cy-14);x.stroke();
+  x.fillStyle='#2a2a3a';x.beginPath();x.ellipse(cx-2,cy-18,6,10,0,0,TAU);x.fill();
+  x.fillStyle='#101010';x.beginPath();x.arc(cx-2,cy-30,5,0,TAU);x.fill();
+  const headX=car.dir===1?cx+18:cx-18;
+  if(n>0.15){
+    const coneEndX=headX+car.dir*120;
+    const cone=x.createLinearGradient(headX,cy-6,coneEndX,cy-6);
+    cone.addColorStop(0,`rgba(255,250,220,${0.55*n})`);
+    cone.addColorStop(1,'rgba(255,250,220,0)');
+    x.fillStyle=cone;
+    x.beginPath();
+    x.moveTo(headX,cy-8);x.lineTo(coneEndX,cy-20);
+    x.lineTo(coneEndX,cy+8);x.lineTo(headX,cy-4);
+    x.closePath();x.fill();
+    x.beginPath();x.arc(headX,cy-6,2.5,0,TAU);
+    x.fillStyle=`rgba(255,250,220,${0.95*n})`;x.fill();
+    const tailX=car.dir===1?cx-18:cx+18;
+    const brakeBoost=1+(1-car.brakeSmooth)*0.7;
+    x.beginPath();x.arc(tailX,cy-6,2,0,TAU);
+    x.fillStyle=`rgba(255,60,40,${Math.min(1,0.9*n*brakeBoost)})`;x.fill();
+    const rg=x.createRadialGradient(tailX,cy-6,0,tailX,cy-6,12*brakeBoost);
+    rg.addColorStop(0,`rgba(255,40,30,${0.5*n*brakeBoost})`);
+    rg.addColorStop(1,'rgba(255,40,30,0)');
+    x.fillStyle=rg;
+    x.fillRect(tailX-12*brakeBoost,cy-6-12*brakeBoost,24*brakeBoost,24*brakeBoost);
+  }
+}
+
+function drawCar(car){
+  if(car.isMoto){drawMoto(car);return;}
+  const cx=car.x,cy=car.y,w=car.w,h=car.h;
+  const n=nightAmt();
+  const wheelY=cy+h*0.35;
+
+  x.fillStyle='rgba(0,0,0,0.35)';
+  x.beginPath();x.ellipse(cx,wheelY+h*0.18,w*0.55,h*0.20,0,0,TAU);x.fill();
+
+  if(rainStrength>0.4){
+    x.fillStyle=`rgba(200,220,255,${0.2*rainStrength})`;
+    x.beginPath();x.ellipse(cx-w*0.3,wheelY+h*0.15,w*0.2,h*0.15,0,0,TAU);x.fill();
+    x.beginPath();x.ellipse(cx+w*0.3,wheelY+h*0.15,w*0.2,h*0.15,0,0,TAU);x.fill();
+  }
+
+  x.fillStyle=car.color;
+  if(car.isTruck){
+    x.fillRect(cx-w/2,cy-h*0.65,w*0.36,h*0.9);
+    x.fillRect(cx-w/2+w*0.36,cy-h*0.52,w*0.64,h*0.75);
+    x.fillStyle=`rgba(${30+30*n},${45+30*n},${65+30*n},0.9)`;
+    x.fillRect(cx-w/2+w*0.06,cy-h*0.58,w*0.24,h*0.35);
+  } else {
+    x.fillRect(cx-w/2,cy-h*0.55,w,h*0.8);
+    x.fillRect(cx-w*0.28,cy-h*0.9,w*0.56,h*0.4);
+    x.fillStyle=`rgba(${30+30*n},${45+30*n},${65+30*n},0.9)`;
+    x.fillRect(cx-w*0.25,cy-h*0.82,w*0.5,h*0.32);
+    x.fillStyle='rgba(255,255,255,0.08)';
+    x.fillRect(cx-w*0.25,cy-h*0.86,w*0.5,2);
+  }
+
+  if(car.isEmergency&&car.emergencyColor==='#f0f0f0'){
+    x.fillStyle='#d02020';
+    x.fillRect(cx-w*0.05,cy-h*0.45,w*0.10,h*0.28);
+    x.fillRect(cx-w*0.18,cy-h*0.31,w*0.36,h*0.10);
+    x.fillStyle=`rgba(${30+30*n},${45+30*n},${65+30*n},0.9)`;
+    x.fillRect(cx-w/2+w*0.06,cy-h*0.58,w*0.20,h*0.30);
+  }
+  if(car.isEmergency&&car.emergencyColor==='#0a0a3a'){
+    x.fillStyle='#ffffff';
+    x.fillRect(cx-w*0.5,cy-h*0.15,w,h*0.10);
+  }
+  if(car.isEmergency){
+    const blink=Math.sin(car.siren*4)>0;
+    x.fillStyle=blink?'#ff2020':'#2040ff';
+    const blinkW=w*0.18,blinkH=h*0.10;
+    x.fillRect(cx-blinkW/2,cy-h*1.05,blinkW,blinkH);
+    if(n>0.3){
+      const g=x.createRadialGradient(cx,cy-h*1.0,2,cx,cy-h*1.0,30);
+      const col=blink?'255,40,40':'40,80,255';
+      g.addColorStop(0,`rgba(${col},${0.7*n})`);
+      g.addColorStop(1,`rgba(${col},0)`);
+      x.fillStyle=g;x.fillRect(cx-30,cy-h*1.0-30,60,60);
+    }
+  }
+
+  const wheelR=h*0.22;
+  x.fillStyle='#0a0a0a';
+  x.beginPath();x.arc(cx-w*0.3,wheelY,wheelR,0,TAU);x.fill();
+  x.beginPath();x.arc(cx+w*0.3,wheelY,wheelR,0,TAU);x.fill();
+  car.wheelAngle=(car.wheelAngle+car.dir*car.speed*0.0024)%TAU;
+  x.strokeStyle='rgba(120,120,120,0.7)';x.lineWidth=1.2;
+  for(const wx of [cx-w*0.3,cx+w*0.3]){
+    x.beginPath();
+    x.moveTo(wx+Math.cos(car.wheelAngle)*wheelR*0.7,wheelY+Math.sin(car.wheelAngle)*wheelR*0.7);
+    x.lineTo(wx-Math.cos(car.wheelAngle)*wheelR*0.7,wheelY-Math.sin(car.wheelAngle)*wheelR*0.7);
+    x.stroke();
+  }
+
+  const headX=car.dir===1?cx+w/2:cx-w/2;
+  const tailX=car.dir===1?cx-w/2:cx+w/2;
+
+  if(n>0.15){
+    const coneEndX=headX+car.dir*180;
+    const cone=x.createLinearGradient(headX,cy,coneEndX,cy);
+    cone.addColorStop(0,`rgba(255,250,220,${0.45*n})`);
+    cone.addColorStop(1,'rgba(255,250,220,0)');
+    x.fillStyle=cone;
+    x.beginPath();
+    x.moveTo(headX,cy-h*0.35);
+    x.lineTo(coneEndX,cy-h*0.4);
+    x.lineTo(coneEndX,cy+h*1.2);
+    x.lineTo(headX,cy+h*0.35);
+    x.closePath();x.fill();
+
+    x.beginPath();x.arc(headX,cy-h*0.2,3.2,0,TAU);
+    x.fillStyle=`rgba(255,250,220,${0.95*n})`;x.fill();
+
+    const brakeBoost=1+(1-car.brakeSmooth)*0.7;
+    x.beginPath();x.arc(tailX,cy-h*0.2,2.5,0,TAU);
+    x.fillStyle=`rgba(255,60,40,${Math.min(1,0.95*n*brakeBoost)})`;x.fill();
+    const rg=x.createRadialGradient(tailX,cy-h*0.2,0,tailX,cy-h*0.2,20*brakeBoost);
+    rg.addColorStop(0,`rgba(255,40,30,${0.6*n*brakeBoost})`);
+    rg.addColorStop(1,'rgba(255,40,30,0)');
+    x.fillStyle=rg;
+    x.fillRect(tailX-20*brakeBoost,cy-h*0.2-20*brakeBoost,40*brakeBoost,40*brakeBoost);
+  } else {
+    x.beginPath();x.arc(headX,cy-h*0.2,2.8,0,TAU);
+    x.fillStyle='rgba(255,255,210,0.7)';x.fill();
+    x.beginPath();x.arc(tailX,cy-h*0.2,2.2,0,TAU);
+    x.fillStyle='rgba(200,40,30,0.75)';x.fill();
+  }
+
+  if(car.turnSignal!==0&&!car.isEmergency&&Math.sin(t*3)>0){
+    const sx=car.turnSignal===1?cx+w/2:cx-w/2;
+    x.beginPath();x.arc(sx,cy-h*0.3,3,0,TAU);
+    x.fillStyle=`rgba(255,180,60,${0.9*n})`;x.fill();
+  }
+}
+
+function drawPerson(p){
+  const px=p.x+p.sideStep,py=p.y,h=p.h;
+  if(p.isDog){drawDog(p);return;}
+
+  p.blinkTimer-=0.016;
+  if(p.blinkTimer<=0){
+    p.isBlinking=!p.isBlinking;
+    p.blinkTimer=p.isBlinking?0.15:rnd(2.5,4.5);
+  }
+
+  const freq=p.gait==='slow'?4:p.gait==='fast'?9:p.gait==='limp'?5:6;
+  const amp=p.gait==='slow'?0.12:p.gait==='fast'?0.22:p.gait==='limp'?0.25:0.18;
+  const isEscaping=p.frozen && p.escapeMode==='run';
+  const walkCycle=p.frozen?(isEscaping?Math.sin(t*12+p.phase):0):Math.sin(t*freq+p.phase);
+  const legSwing=walkCycle*h*amp;
+
+  const n=nightAmt();
+  if(n<0.4){
+    x.fillStyle=`rgba(0,0,0,${0.30*(1-n/0.4)})`;
+    x.beginPath();x.ellipse(px,py+h*0.52,h*0.30,h*0.09,0,0,TAU);x.fill();
+  }
+
+  x.strokeStyle=p.pants;
+  x.lineWidth=h*0.09;x.lineCap='round';
+  x.beginPath();
+  x.moveTo(px-h*0.05,py+h*0.5);
+  x.lineTo(px-h*0.05+legSwing*0.4,py+h*0.5-legSwing);
+  x.moveTo(px+h*0.05,py+h*0.5);
+  x.lineTo(px+h*0.05-legSwing*0.4,py+h*0.5+legSwing);
+  x.stroke();
+
+  x.fillStyle=p.shirt;
+  if(!p.umbrella&&rainStrength>0.3)x.globalAlpha=1-p.wetness*0.3;
+  x.beginPath();x.ellipse(px,py+h*0.05,h*0.16,h*0.28,0,0,TAU);x.fill();
+  x.globalAlpha=1;
+
+  if(p.isMusician){
+    x.fillStyle='#7a4a20';
+    x.beginPath();x.ellipse(px-h*0.20,py+h*0.05,h*0.18,h*0.12,-0.3,0,TAU);x.fill();
+    x.strokeStyle='#3a2a10';x.lineWidth=h*0.04;
+    x.beginPath();x.moveTo(px-h*0.05,py-h*0.05);x.lineTo(px+h*0.20,py-h*0.30);x.stroke();
+  }
+
+  if(p.hasBag){
+    x.fillStyle='rgba(40,30,25,0.9)';
+    x.fillRect(px-h*0.22,py+h*0.05,h*0.10,h*0.20);
+  }
+
+  x.strokeStyle=p.shirt;x.lineWidth=h*0.07;
+  if(isEscaping){
+    x.beginPath();
+    x.moveTo(px-h*0.14,py-h*0.05);x.lineTo(px-h*0.22,py-h*0.35);
+    x.moveTo(px+h*0.14,py-h*0.05);x.lineTo(px+h*0.22,py-h*0.35);
+    x.stroke();
+  } else if(p.frozen){
+    const wobble=Math.sin(t*8+p.phase)*0.5;
+    x.beginPath();
+    x.moveTo(px-h*0.14,py-h*0.05);x.lineTo(px-h*0.18+wobble,py+h*0.18);
+    x.moveTo(px+h*0.14,py-h*0.05);x.lineTo(px+h*0.18-wobble,py+h*0.18);
+    x.stroke();
+  } else {
+    const armSwing=p.phone?0:legSwing*0.3;
+    x.beginPath();
+    x.moveTo(px-h*0.14,py-h*0.05);
+    x.lineTo(px-h*0.20,py+h*0.15-armSwing);
+    if(p.phone){
+      x.moveTo(px+h*0.14,py-h*0.05);x.lineTo(px+h*0.10,py-h*0.35);
+    } else {
+      x.moveTo(px+h*0.14,py-h*0.05);x.lineTo(px+h*0.20,py+h*0.15+armSwing);
+    }
+    x.stroke();
+  }
+
+  if(p.phone && !p.frozen){
+    x.fillStyle='rgba(20,20,30,0.95)';
+    x.fillRect(px+h*0.08,py-h*0.42,h*0.06,h*0.10);
+  }
+
+  const headShift=Math.sin(t*0.5+p.talkPhase)*h*0.02;
+  x.fillStyle=p.skin;
+  x.beginPath();x.arc(px+headShift,py-h*0.35,h*0.14,0,TAU);x.fill();
+
+  if(h>26&&!p.isBlinking&&p.hat!=='cap'&&p.hat!=='hood'){
+    x.fillStyle='#1a1a1a';
+    const ex=px+headShift,ey=py-h*0.36,dir=p.dir;
+    x.fillRect(ex+dir*2-1,ey-1,1.2,1.2);
+    x.fillRect(ex+dir*2+1,ey-1,1.2,1.2);
+  }
+
+  if(p.hat==='cap'){
+    x.fillStyle='#1a1a1a';
+    x.beginPath();x.arc(px+headShift,py-h*0.40,h*0.15,Math.PI,TAU);x.fill();
+    x.fillRect(px+headShift-h*0.05,py-h*0.42,h*0.20,h*0.04);
+  } else if(p.hat==='beanie'){
+    x.fillStyle=`hsl(${(p.phase*57)%360|0},50%,40%)`;
+    x.beginPath();x.arc(px+headShift,py-h*0.42,h*0.15,Math.PI,TAU);x.fill();
+  } else if(p.hat==='hood'){
+    x.fillStyle=p.shirt;
+    x.beginPath();x.arc(px+headShift,py-h*0.40,h*0.17,Math.PI,TAU);x.fill();
+  } else {
+    x.fillStyle='#1a1a1a';
+    x.beginPath();x.arc(px+headShift,py-h*0.40,h*0.15,Math.PI,TAU);x.fill();
+  }
+
+  if(p.umbrella && rainStrength>0.15){
+    const wobble=Math.sin(t*2+p.phase)*2;
+    const ux=px+h*0.20+wobble*0.3;
+    const uy=py-h*0.7;
+    x.strokeStyle='#222';x.lineWidth=h*0.025;
+    x.beginPath();
+    x.moveTo(px+h*0.20,py+h*0.15);
+    x.lineTo(ux,uy+wobble*0.5);
+    x.stroke();
+    const ug=x.createRadialGradient(ux,uy,2,ux,uy,h*0.32);
+    ug.addColorStop(0,p.umbrellaColor);
+    ug.addColorStop(1,'#1a1a1a');
+    x.fillStyle=ug;
+    x.beginPath();x.arc(ux,uy,h*0.28,Math.PI,TAU);x.fill();
+  } else if(rainStrength>0.5){
+    x.strokeStyle=`rgba(200,220,255,${0.35*rainStrength})`;
+    x.lineWidth=1;
+    const drip=(t*50+p.phase*15)%10;
+    x.beginPath();
+    x.moveTo(px+h*0.15,py-h*0.5+drip);
+    x.lineTo(px+h*0.15,py-h*0.5+drip+2);
+    x.stroke();
+  }
+}
+
+function drawDog(p){
+  const px=p.x+p.sideStep,py=p.y,h=p.h;
+  x.fillStyle='rgba(0,0,0,0.4)';
+  x.beginPath();x.ellipse(px,py+h*0.4,h*0.5,h*0.2,0,0,TAU);x.fill();
+  x.fillStyle='#6a4020';
+  x.beginPath();x.ellipse(px,py-h*0.1,h*0.55,h*0.35,0,0,TAU);x.fill();
+  x.beginPath();x.arc(px+p.dir*h*0.6,py-h*0.35,h*0.25,0,TAU);x.fill();
+  x.beginPath();x.arc(px+p.dir*h*0.55,py-h*0.55,h*0.10,0,TAU);x.fill();
+  x.strokeStyle='#6a4020';x.lineWidth=h*0.15;
+  const step=p.frozen?0:Math.sin(t*12+p.phase)*h*0.15;
+  x.beginPath();
+  x.moveTo(px-h*0.35,py+h*0.25);x.lineTo(px-h*0.35+step,py+h*0.45);
+  x.moveTo(px+h*0.35,py+h*0.25);x.lineTo(px+h*0.35-step,py+h*0.45);
+  x.stroke();
+  x.beginPath();
+  x.moveTo(px-p.dir*h*0.5,py-h*0.15);
+  x.lineTo(px-p.dir*h*0.75,py-h*0.5+Math.sin(t*10+p.phase)*h*0.1);
+  x.stroke();
+}
+
+function updateCleaner(dt){
+  if(rainStrength>0.5 && !cleaner){
+    if(Math.random()<0.008)spawnCleaner();
+  }
+  if(rainStrength<0.2 && cleaner)cleaner=null;
+  if(cleaner){
+    cleaner.x+=cleaner.dir*SPEED.cleaner*dt;
+    cleaner.phase+=dt*8;
+    if(rainStrength>0.5 && Math.random()<0.3){
+      fx.particles.push({
+        x:cleaner.x+cleaner.dir*25,y:cleaner.y+21,
+        vx:cleaner.dir*rnd(10,40),vy:rnd(-30,-10),
+        life:0.4,maxLife:0.4,
+        color:'rgba(180,200,230,0.6)',size:rnd(1,2)
+      });
+    }
+    // Уход за край — последней проверкой: ниже его уже не читаем, иначе
+    // на последнем кадре ловим null (было так).
+    if(cleaner.x<-40||cleaner.x>W+40)cleaner=null;
+  }
+}
+function drawCleaner(){
+  if(!cleaner)return;
+  const px=cleaner.x,py=cleaner.y,h=42;
+  const legSwing=Math.sin(cleaner.phase*0.5)*h*0.15;
+
+  x.fillStyle='rgba(0,0,0,0.4)';
+  x.beginPath();x.ellipse(px,py+h*0.5,h*0.35,h*0.10,0,0,TAU);x.fill();
+  x.strokeStyle='#2a2a3a';x.lineWidth=h*0.09;x.lineCap='round';
+  x.beginPath();
+  x.moveTo(px-h*0.05,py+h*0.2);x.lineTo(px-h*0.05+legSwing*0.4,py+h*0.5);
+  x.moveTo(px+h*0.05,py+h*0.2);x.lineTo(px+h*0.05-legSwing*0.4,py+h*0.5);
+  x.stroke();
+  x.fillStyle='#d08020';
+  x.beginPath();x.ellipse(px,py-h*0.05,h*0.18,h*0.30,0,0,TAU);x.fill();
+  x.fillStyle='#d8b090';
+  x.beginPath();x.arc(px,py-h*0.45,h*0.14,0,TAU);x.fill();
+  x.fillStyle='#d08020';
+  x.beginPath();x.arc(px,py-h*0.48,h*0.16,Math.PI,TAU);x.fill();
+  x.strokeStyle='#d08020';x.lineWidth=h*0.07;
+  x.beginPath();
+  x.moveTo(px-h*0.15,py-h*0.1);x.lineTo(px-h*0.25,py+h*0.15);
+  x.moveTo(px+h*0.15,py-h*0.1);x.lineTo(px+h*0.25,py+h*0.15);
+  x.stroke();
+  const broomSwing=Math.sin(cleaner.phase)*h*0.15;
+  x.strokeStyle='#5a3a20';x.lineWidth=h*0.05;
+  x.beginPath();
+  x.moveTo(px+cleaner.dir*h*0.3,py+h*0.1);
+  x.lineTo(px+cleaner.dir*(h*0.6+broomSwing),py+h*0.5);
+  x.stroke();
+  x.strokeStyle='#a07040';x.lineWidth=1;
+  for(let i=0;i<5;i++){
+    x.beginPath();
+    x.moveTo(px+cleaner.dir*(h*0.6+broomSwing),py+h*0.5);
+    x.lineTo(px+cleaner.dir*(h*0.6+broomSwing)+rnd(-3,3),py+h*0.58);
+    x.stroke();
+  }
+}
+
+function drawBirds(){
+  const n=nightAmt();
+  if(n>0.7)return;
+  for(const b of birds){
+    const flap=Math.sin(b.flapPhase*TAU)*6*b.scale;
+    x.strokeStyle=`rgba(20,20,30,${0.7-n*0.4})`;
+    x.lineWidth=1.6*b.scale;
+    x.beginPath();
+    x.moveTo(b.x-6*b.scale,b.y-flap);
+    x.lineTo(b.x,b.y);
+    x.lineTo(b.x+6*b.scale,b.y-flap);
+    x.stroke();
+  }
+}
+function drawPigeons(){
+  const n=nightAmt();
+  if(n>0.6)return;
+  for(const p of pigeons){
+    if(p.flying){
+      const py=p.y+p.flyY;
+      const flap=Math.sin(t*20+p.phase)*4;
+      x.strokeStyle=`rgba(40,40,50,${0.9-n*0.3})`;
+      x.lineWidth=1.5;
+      x.beginPath();
+      x.moveTo(p.x-4,py-flap);x.lineTo(p.x,py);x.lineTo(p.x+4,py-flap);
+      x.stroke();
+      continue;
+    }
+    const bob=p.moving?Math.sin(t*10+p.phase)*1.5:Math.sin(t*2+p.phase)*0.3;
+    const py=p.y+bob;
+    x.fillStyle=`rgba(60,60,70,${0.85-n*0.3})`;
+    x.beginPath();x.ellipse(p.x,py,4,3,0,0,TAU);x.fill();
+    x.beginPath();x.arc(p.x+p.dir*3.5,py-2.5,2,0,TAU);x.fill();
+    x.beginPath();
+    x.moveTo(p.x-p.dir*3,py);x.lineTo(p.x-p.dir*7,py-2);
+    x.lineTo(p.x-p.dir*7,py+1);
+    x.closePath();x.fill();
+  }
+}
+
+function drawRain(){
+  if(rainStrength<0.05)return;
+  const n=nightAmt();
+  const windX=stormStrength*3;
+  const visibleCount=rainDrops.length*rainStrength|0;
+  x.strokeStyle=`rgba(180,200,230,${(0.35+0.25*n)*rainStrength})`;
+  x.lineWidth=1;
+  for(let i=0;i<visibleCount;i++){
+    const d=rainDrops[i];
+    d.y+=d.v*rainStrength*(1+stormStrength*0.8)*lastDt;
+    d.x+=(d.vx+windX)*rainStrength*lastDt*60;
+    if(d.y>H){d.y=-10;d.x=Math.random()*W;}
+    if(d.x<-20)d.x=W+20;
+    if(d.x>W+20)d.x=-20;
+    if(d.y<HORIZON && Math.random()>0.2*rainStrength)continue;
+    x.beginPath();
+    x.moveTo(d.x,d.y);
+    x.lineTo(d.x-1-windX,d.y+d.len*rainStrength);
+    x.stroke();
+  }
+  x.fillStyle=`rgba(80,100,140,${(0.04+0.05*n)*rainStrength})`;
+  x.fillRect(0,0,W,H);
+}
+
+function drawFog(){
+  if(fogStrength<0.05)return;
+  // Слой печётся один раз: форма и цвет тумана не меняются, а гуляющая
+  // прозрачность — это globalAlpha при выводе.
+  x.globalAlpha=fogStrength;
+  x.drawImage(baked('fog',1e9,H-HORIZON+80,(g)=>{
+    const h=H-HORIZON+80;
+    const lg=g.createLinearGradient(0,0,0,h);
+    lg.addColorStop(0,'rgba(160,170,190,0.35)');
+    lg.addColorStop(0.6,'rgba(140,150,180,0.20)');
+    lg.addColorStop(1,'rgba(120,130,160,0.10)');
+    g.fillStyle=lg;g.fillRect(0,0,W,h);
+  }),0,HORIZON-80);
+  x.globalAlpha=1;
+}
+
+function drawNightVeil(){
+  const n=nightAmt();
+  if(n<=0)return;
+  x.fillStyle=`rgba(15,20,55,${n*0.30*(1-blackoutT*0.6)})`;
+  x.fillRect(0,0,W,BG_BOT+10);
+}
+
+function drawBlackout(){
+  if(blackoutT<0.05)return;
+  x.fillStyle=`rgba(0,0,0,${blackoutT*0.75})`;
+  x.fillRect(0,0,W,H);
+}
+
+function drawLightningOverlay(){
+  if(lightningFlash<=0)return;
+  x.fillStyle=`rgba(255,255,255,${lightningFlash*0.45})`;
+  x.fillRect(0,0,W,H);
+}
+
+// ===== КЭШ ОВЕРЛЕЯ =====
+// Строки развёртки и зерно рисовались по прямоугольнику на пиксель — почти
+// 10 мс из бюджета кадра. Плитка-паттерн это не лечит: Skia запекает
+// createPattern в шейдер, и чтение пикселей (canvas.data() в
+// scripts/stream_source.mjs) дорожает с 5 до 150 мс на кадр — эфир встаёт.
+// Замер: паттерн + чтение 148 мс, полноэкранный слой через drawImage + чтение
+// 3-7 мс. Поэтому строки и виньетка пекутся один раз в размер кадра.
+// Постоянное зерно в канвасе убрано: его кладёт FFmpeg своим
+// noise=alls=5:allf=t — там оно и дешевле, и живее. Зерно осталось только на
+// смене трека, чтобы переход шумел.
+let tileCache=null;
+function overlayTiles(){
+  if(tileCache)return tileCache;
+  const layer=(paint)=>{
+    const cv=document.createElement('canvas');
+    cv.width=W;cv.height=H;
+    paint(cv.getContext('2d'));
+    return cv;
+  };
+  const scan=layer((g)=>{                    // тёмная строка из трёх
+    g.fillStyle='#000';
+    for(let y=0;y<H;y+=3)g.fillRect(0,y,W,1);
+  });
+  const vignette=layer((g)=>{
+    const vg=g.createRadialGradient(W*0.52,H*0.58,H*0.35,W*0.48,H*0.62,H*0.95);
+    vg.addColorStop(0,'rgba(0,0,0,0)');
+    vg.addColorStop(1,'rgba(0,0,0,0.82)');
+    g.fillStyle=vg;g.fillRect(0,0,W,H);
+  });
+  // Виньетка и строки развёртки лежат друг на друге — это один слой, значит
+  // одна накладка на кадр вместо двух.
+  const glass=layer((g)=>{
+    g.drawImage(vignette,0,0);
+    g.globalAlpha=0.05;g.drawImage(scan,0,0);
+  });
+  const grain=layer((g)=>{                   // шум перевода камеры
+    const dots=W*H/364|0;
+    g.fillStyle='rgba(255,255,255,0.5)';
+    for(let i=0;i<dots;i++)g.fillRect(Math.random()*W|0,Math.random()*H|0,1,1);
+    g.fillStyle='rgba(0,0,0,0.5)';
+    for(let i=0;i<dots;i++)g.fillRect(Math.random()*W|0,Math.random()*H|0,1,1);
+  });
+  tileCache={glass,grain};
+  return tileCache;
+}
+
+function drawOverlay(){
+  const tiles=overlayTiles();
+  // Гроза чуть плотнее накрывает кадр, в остальном стекло постоянное.
+  x.globalAlpha=0.95+stormStrength*0.1;
+  x.drawImage(tiles.glass,0,0);
+  x.globalAlpha=1;
+
+  // Полосы «бегущей строки»: те же прямоугольники, что и в стекле.
+  x.globalAlpha=0.025;
+  x.fillStyle='#000';
+  for(let y0=0;y0<H;y0+=9){
+    const vx=(t*15+y0)%W;
+    x.fillRect(vx,y0,1,9);
+  }
+  x.globalAlpha=1;
+
+  if(Math.random()<0.006){
+    x.fillStyle=`rgba(255,255,255,${rnd(0.03,0.13)})`;
+    x.fillRect(0,rnd(0,H),W,rnd(1,6));
+  }
+
+  if(currentEvent==='glitch'){
+    for(let i=0;i<12;i++){
+      x.fillStyle=`rgba(255,255,255,${rnd(0.05,0.20)})`;
+      x.fillRect(0,rnd(0,H),W,rnd(1,10));
+    }
+  }
+
+  // Переводка камеры на смене трека: короткий шум, полосы, вспышка в чёрное.
+  if(cutT>0){
+    const k=cutT/0.5;
+    x.globalAlpha=0.12+0.30*k;
+    x.drawImage(tiles.grain,0,0);
+    x.globalAlpha=1;
+    for(let i=0;i<3;i++){
+      x.fillStyle=`rgba(255,255,255,${0.04+0.10*Math.random()*k})`;
+      x.fillRect(0,Math.random()*H,W,2+Math.random()*10*k);
+    }
+    if(k>0.75){x.fillStyle=`rgba(0,0,0,${(k-0.75)*3.2})`;x.fillRect(0,0,W,H);}
+  }
+}
+
+function drawHud(){
+  // Слабый сигнал: источник сам меряет, сколько кадров машина успевает
+  // нарисовать, и поднимает флаг, когда частота падает вдвое.
+  const weak=Number(globalThis.WEAK_SIGNAL||0)>0;
+  x.font='700 18px monospace';
+  x.fillStyle=weak?'rgba(255,180,80,0.95)':'rgba(255,80,80,0.95)';
+  x.fillText(weak?'● СЛАБЫЙ СИГНАЛ':'● ИДЁТ ТРАНСЛЯЦИЯ НА КАНАЛ',26,36);
+  x.font='13px monospace';
+  x.fillStyle='rgba(220,255,230,0.9)';
+  // Номер камеры меняется вместе с улицей, а имя канала стоит рядом: эфир —
+  // часть мира, а не наклейка поверх картинки.
+  x.fillText('КАМ '+String(camNo).padStart(2,'0')+' · '+BRAND.name+' · УЛИЦА',26,60);
+  const phase=dayT<0.20?'НОЧЬ':dayT<0.30?'РАССВЕТ':dayT<0.65?'ДЕНЬ':dayT<0.75?'ЗАКАТ':'НОЧЬ';
+  const wLabel=weather==='storm'?'ГРОЗА':weather==='rain'?'ДОЖДЬ':weather==='fog'?'ТУМАН':'ЯСНО';
+  const sLabel={summer:'ЛЕТО',autumn:'ОСЕНЬ',winter:'ЗИМА',spring:'ВЕСНА'}[season];
+  x.fillText('ФАЗА: '+phase+'  ·  '+sLabel+'  ·  '+wLabel,26,80);
+  if(currentEvent&&currentEvent_label){
+    const evAlpha=Math.min(Math.min(1,eventAge*2),Math.min(1,Math.max(0,eventDuration*1.5)));
+    x.fillStyle=`rgba(255,220,120,${0.95*evAlpha})`;
+    x.fillText('СОБЫТИЕ: '+currentEvent_label,26,100);
+    x.fillStyle='rgba(220,255,230,0.9)';
+  }
+  // Что играет в этот момент. Слой радио в эфир не выносим — слушателю нужно
+  // имя композиции, а не наши внутренние названия; темп оставляем, он про музыку.
+  if(compName){
+    x.fillStyle='rgba(180,230,255,0.85)';
+    x.fillText('КОМПОЗИЦИЯ: '+compName+(trackBpm?'  ·  '+trackBpm+' BPM':''),26,120);
+    x.fillStyle='rgba(220,255,230,0.9)';
+  }
+  // Часы архивной записи. Час берём с самой картинки: если в кадре ночь, на
+  // плашке не может стоять полдень. Секунды идут по настоящим часам, чтобы
+  // запись выглядела живой.
+  const date=new Date(archive.year,archive.month-1,archive.day);
+  const day=date.toLocaleDateString('ru-RU',{weekday:'short',day:'2-digit',month:'2-digit',year:'numeric'});
+  const hours=((dayT%1)+1)%1*24;
+  const hh=Math.floor(hours),mm=Math.floor((hours-hh)*60),ss=Math.floor(Date.now()/1000)%60;
+  const ts=String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0');
+  x.textAlign='right';
+  x.fillStyle='rgba(220,255,230,0.9)';
+  x.fillText('АРХИВ',W-26,36);
+  x.fillText(day+'  '+ts,W-26,60);
+  x.fillText(BRAND.name,W-26,80);
+  x.textAlign='left';
+}
+
+// ===== UPDATE =====
+function update(dt){
+  updateMood(dt);
+  dayT=(dayT+DAY_SPEED*dt)%1;
+  if(cutT>0)cutT=Math.max(0,cutT-dt);
+
+  // Сезон задан треком (см. rollStreet), сам по себе не крутится: иначе за
+  // прогон зима с летом успевали поменяться тридцать раз.
+
+  weatherTimer-=dt;
+  if(weatherTimer<=0&&!(currentEvent==='stormEvent'||currentEvent==='rainbow'||currentEvent==='snow')){
+    weather=pickWeatherFor(mood);
+    weatherTimer=rnd(60,150);
+  }
+  const targetRain=weather==='rain'?0.7:weather==='storm'?1.0:0;
+  const targetFog=weather==='fog'?1.0:0;
+  const targetStorm=weather==='storm'?1.0:0;
+  rainStrength+=(targetRain-rainStrength)*Math.min(1,dt*0.15);
+  fogStrength+=(targetFog-fogStrength)*Math.min(1,dt*0.1);
+  stormStrength+=(targetStorm-stormStrength)*Math.min(1,dt*0.2);
+
+  updateSplashes(dt);
+
+  if(stormStrength>0.5){
+    lightningTimer-=dt;
+    if(lightningTimer<=0){
+      lightningFlash=1.0;
+      lightningTimer=rnd(4,18);
+      setTimeout(()=>{thunderShake=1.2;},rnd(400,1500));
+    }
+  }
+  if(lightningFlash>0)lightningFlash-=dt*3;
+  if(thunderShake>0)thunderShake-=dt*2;
+
+  eventTimer-=dt;
+  if(eventTimer<=0){
+    if(!currentEvent)triggerEvent();
+    // Частота событий следует за темпом трека: быстрая музыка — плотнее жизнь.
+    eventTimer=rnd(12,30)/pace;
+  }
+  if(currentEvent){
+    eventAge+=dt;eventDuration-=dt;
+    const ev=EVENTS.find(e=>e.id===currentEvent);
+    if(ev){
+      if(ev.update)ev.update(dt);
+      if(eventDuration<=0||(ev.isDone&&ev.isDone()))endEvent();
+    } else endEvent();
+  }
+
+  // МАШИНЫ
+  carTimer-=dt;
+  const busyWithEvent=currentEvent&&['chase','ambulance','parade','biker','crash'].includes(currentEvent);
+  if(carTimer<=0&&cars.length<25&&!busyWithEvent){
+    if(spawnCar())carTimer=rnd(2,4);
+    else carTimer=rnd(0.5,1.5);
+  }
+  for(let i=cars.length-1;i>=0;i--){
+    const car=cars[i];
+    car.braking=false;
+
+    let brake=1;
+    for(const p of people){
+      if(p.y<ROAD_TOP+15||p.y>SIDEWALK_NEAR-10)continue;
+      const laneThreshold=p.isDog?30:40;
+      if(Math.abs(p.y-car.y)>laneThreshold)continue;
+
+      const dx=p.x-car.x;
+      const adx=Math.abs(dx);
+      const ahead=(car.dir===1&&dx>0&&dx<130)||(car.dir===-1&&dx<0&&dx>-130);
+      if(ahead){
+        let factor;
+        if(adx<20)factor=0;
+        else if(adx<40)factor=0.05;
+        else if(adx<80)factor=0.4;
+        else factor=0.8;
+        brake=Math.min(brake,factor);
+      }
+    }
+
+    car.brakeSmooth+=(brake-car.brakeSmooth)*Math.min(1,dt*2.5);
+
+    if(!car.isManagedByEvent){
+      const speedMul=(0.7+car.personality*0.8)*car.brakeSmooth;
+      car.x+=car.dir*car.speed*speedMul*dt;
+      car.braking=car.brakeSmooth<0.95;
+    } else {
+      const eventBrake=Math.max(car.brakeSmooth,0.5);
+      car.braking=eventBrake<0.95;
+      // движение событийных машин — в eventData.update
+    }
+
+    if(car.dir===-1&&car.x<-350)cars.splice(i,1);
+    else if(car.dir===1&&car.x>W+350)cars.splice(i,1);
+  }
+
+  // ЛЮДИ
+  personTimer-=dt;
+  const maxPeople=Math.round(26*crowd);
+  if(personTimer<=0&&people.length<maxPeople){
+    spawnPerson();
+    personTimer=rnd(2,4)/(pace*crowd);
+  }
+  for(let i=people.length-1;i>=0;i--){
+    const p=people[i];
+    const isManaged=p.eventTag && currentEvent && p.speed<=0.1;
+    if(!isManaged && !p.frozen){
+      const speedMul=p.gait==='fast'?1.4:p.gait==='slow'?0.6:p.gait==='limp'?0.7:1;
+      const umbrellaMul=p.umbrella?0.85:1;
+      const rainMul=(rainStrength>0.5&&!p.umbrella)?1.6:1;
+      if(p.isCrossing){
+        p.y+=p.dir*p.speed*speedMul*rainMul*umbrellaMul*dt*0.6;
+      } else {
+        p.x+=p.dir*p.speed*speedMul*rainMul*umbrellaMul*dt;
+      }
+    }
+
+    p.umbrellaCheckTimer-=dt;
+    if(p.umbrellaCheckTimer<=0){
+      p.umbrellaCheckTimer=rnd(0.8,1.5);
+      if(!p.eventTag){
+        if(rainStrength>0.4&&!p.umbrella&&Math.random()<0.2){
+          p.umbrella=true;
+          p.umbrellaColor=`hsl(${rnd(0,360)|0},60%,50%)`;
+          p.wetness=0;
+        } else if(rainStrength<0.15&&p.umbrella&&Math.random()<0.3){
+          p.umbrella=false;
+        }
+      }
+    }
+
+    if(p.hitCooldown>0)p.hitCooldown-=dt;
+    if(p.thawTimer>0)p.thawTimer-=dt;
+
+    if(p.isCrossing){
+      if(p.y<SIDEWALK_FAR-20 || p.y>SIDEWALK_NEAR+20){
+        people.splice(i,1);continue;
+      }
+    } else {
+      if(p.dir===-1&&p.x<-80){people.splice(i,1);continue;}
+      if(p.dir===1&&p.x>W+80){people.splice(i,1);continue;}
+    }
+
+    p.sideStep*=0.9;
+    p.frozen=false;
+    p.escapeMode='idle';
+
+    for(const prop of props){
+      if(Math.abs(p.y-prop.y)<10 && Math.abs(p.x-prop.x)<12){
+        p.sideStep=lerp(p.sideStep,(p.x>prop.x?1:-1)*6,0.2);
+      }
+    }
+
+    const onRoad=p.y>ROAD_TOP+15 && p.y<SIDEWALK_NEAR-10;
+    if(onRoad){
+      for(const car of cars){
+        const dx=car.x-p.x;
+        const dy=car.y-p.y;
+        const ady=Math.abs(dy);
+        if(ady>=30)continue;
+
+        const adx=Math.abs(dx);
+        const dirToCar=dx>0?1:-1;
+
+        if(adx<100){
+          p.frozen=true;p.escapeMode='run';p.thawTimer=0.6;
+          const distToTop=p.y-ROAD_TOP;
+          const distToBottom=SIDEWALK_NEAR-p.y;
+          const escapeDir=distToTop<distToBottom?-1:1;
+          p.y+=escapeDir*80*dt;
+          p.y=clamp(p.y,SIDEWALK_FAR,SIDEWALK_NEAR);
+          if(Math.abs(p.y-SIDEWALK_NEAR)<5)p.y=SIDEWALK_NEAR;
+          if(Math.abs(p.y-SIDEWALK_FAR)<5)p.y=SIDEWALK_FAR;
+          p.sideStep=lerp(p.sideStep,-p.dir*20,0.3);
+        }
+
+        if(adx<car.w*0.6 && ady<20 && p.hitCooldown<=0){
+          p.sideStep=clamp(p.sideStep+dirToCar*200*dt,-25,25);
+          p.frozen=true;p.escapeMode='run';p.thawTimer=1.0;
+          const distToTop=p.y-ROAD_TOP;
+          const distToBottom=SIDEWALK_NEAR-p.y;
+          const escapeDir=distToTop<distToBottom?-1:1;
+          p.y+=escapeDir*120*dt;
+          p.y=clamp(p.y,SIDEWALK_FAR,SIDEWALK_NEAR);
+          fx.flashes.push({
+            x:p.x,y:p.y-p.h*0.3,life:0.3,maxLife:0.3,
+            color:'#ff8080',dx:dirToCar*30,dy:-20
+          });
+          p.hitCooldown=0.5;
+        }
+      }
+    }
+
+    if(!p.frozen && p.thawTimer>0){
+      p.frozen=true;
+      p.escapeMode='idle';
+    }
+  }
+
+  updateBirds(dt);
+  updatePigeons(dt);
+  updateWindows(dt);
+  updateCleaner(dt);
+
+  birdTimer-=dt;
+  if(birdTimer<=0&&birds.length<6){spawnBird();birdTimer=rnd(6,15);}
+  if(pigeons.length<8&&Math.random()<0.0005)spawnPigeon();
+
+  updateFx(dt);
+}
+
+function updateGaze(dt){
+  if(Math.random()<0.005||Math.hypot(gazeTargetX-gazeX,gazeTargetY-gazeY)<20){
+    if(currentEvent){gazeTargetX=rnd(W*0.2,W*0.8);gazeTargetY=rnd(ROAD_TOP,H);}
+    else {gazeTargetX=rnd(W*0.15,W*0.85);gazeTargetY=rnd(H*0.4,H*0.9);}
+  }
+  gazeX+=(gazeTargetX-gazeX)*dt*0.6;
+  gazeY+=(gazeTargetY-gazeY)*dt*0.6;
+  gazeX=clamp(gazeX,0,W);gazeY=clamp(gazeY,0,H);
+}
+
+function camShake(){
+  const shakeAmp=1+stormStrength*2+thunderShake*3;
+  const nx1=(noise2D(t*0.3,0)-0.5)*2;
+  const nx2=(noise2D(t*0.7,10)-0.5)*2;
+  const nx3=(noise2D(t*1.5,20)-0.5)*2;
+  const ny1=(noise2D(t*0.35,5)-0.5)*2;
+  const ny2=(noise2D(t*0.8,15)-0.5)*2;
+  return {
+    dx:(nx1*2+nx2*0.8+nx3*0.3)*shakeAmp,
+    dy:(ny1*1.5+ny2*0.6)*shakeAmp
+  };
+}
+
+// ===== СЛАБЫЙ СИГНАЛ =====
+// Когда машина не успевает рисовать, кадры повторяются и зритель видит рывок.
+// Источник считает настоящую частоту кадров и поднимает WEAK_SIGNAL, если она
+// просела вдвое против номинала: плашка в углу меняется на «СЛАБЫЙ СИГНАЛ».
+// Саму картинку не трогаем — полосы и снег поверх кадра рывок не прячут, а
+// стоят заливок и чтения пикселей.
+
+function frame(now){
+  // Связь с радио: сменился трек — улица пересобирается под его слой и темп.
+  const music=typeof globalThis.getMusicState==='function'?globalThis.getMusicState():null;
+  const switchSec=Number(globalThis.SCENE_SWITCH_SEC||0);
+  const trk=switchSec>0
+    ? Math.floor(t/switchSec)                                  // репетиция
+    : (music&&typeof music.track==='number'?music.track:0);
+  if(trk!==curTrack){curTrack=trk;rollStreet(music);}
+
+  // Потолок на шаг времени — страховка от долгой паузы, а не бюджет кадра:
+  // источник рисует реже эфира и закрывает разницу повторами, поэтому честный
+  // шаг между нарисованными кадрами доходит до 0.06 с. Держать потолок на 0.05
+  // значило бы снова отставать от музыки на каждом кадре.
+  const dt=Math.min(0.1,(now-last)/1000);
+  last=now;lastDt=dt;t+=dt;
+  update(dt);updateGaze(dt);
+
+  x.fillStyle='#000';x.fillRect(0,0,W,H);
+
+  const sh=camShake();
+  const gazeBiasX=(gazeX-W/2)*0.012;
+  const gazeBiasY=(gazeY-H/2)*0.008;
+
+  // Камеру ведём целыми пикселями и без поворота: тогда запечённые слои
+  // кладутся копированием, и Skia не пересчитывает их с фильтром. Микро-поворот
+  // и дробный сдвиг стоили на этом пять миллисекунд на кадр — а на глаз камера
+  // дрожит так же.
+  x.save();
+  x.translate(Math.round(W/2+sh.dx+gazeBiasX),Math.round(H/2+sh.dy+gazeBiasY));
+  x.translate(-W/2,-H/2);
+
+  drawBackdrop();
+  drawBirds();
+
+  if(currentEvent){
+    const ev=EVENTS.find(e=>e.id===currentEvent);
+    if(ev&&ev.draw)ev.draw(x);
+  }
+
+  drawRoad();
+  drawProps();
+  drawBenches();
+  drawLampShadows();
+  drawCleaner();
+
+  cars.sort((a,b)=>a.y-b.y);
+  for(const car of cars)drawCar(car);
+
+  people.sort((a,b)=>a.y-b.y);
+  for(const p of people)drawPerson(p);
+
+  drawPigeons();
+  drawLamps();
+  drawFog();
+  drawRain();
+  drawFx(x);
+  drawBlackout();
+
+  x.restore();
+
+  drawLightningOverlay();
+  drawOverlay();
+  drawHud();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

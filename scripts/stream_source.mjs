@@ -32,14 +32,18 @@ const args = Object.fromEntries(process.argv.slice(2).map((a) => {
 
 const W = Number(args.width || 960);
 const H = Number(args.height || 540);
-// Кадры рисуются реже, чем идёт эфир: растеризация пейзажа в Skia стоит
-// десятки миллисекунд на кадр, и 30 fps в 720p два ядра не тянут. FFmpeg
-// сам доберёт кадры до 30 и растянет картинку до нужного разрешения.
-const FPS = Number(args.fps || 20);
+// Эфир идёт на TARGET_FPS, но источник рисует столько, сколько успевает:
+// растеризация улицы в Skia стоит десятки миллисекунд на кадр, и на слабой
+// машине честные 30 fps обернулись бы отставанием видео от звука — звук-то
+// идёт по реальному времени. Настоящую частоту источника измеряем при запуске
+// и объявляем в строке ready, а FFmpeg добирает кадры до эфирных 30 и кладёт
+// на каждый своё зерно.
+const TARGET_FPS = Number(args.fps || 30);
+let FPS = TARGET_FPS;
+let FRAME_MS = 1000 / TARGET_FPS;
 const PORT = Number(args.port || 0);      // 0 — порт выберет система
 const SR = 44100;
-const SAMPLES_PER_FRAME = SR / FPS;
-const FRAME_MS = 1000 / FPS;
+const AUDIO_BURST = (SR / TARGET_FPS) * 4;
 const SEED = Number(args.seed || Math.floor(Math.random() * 0xffffffff)) >>> 0;
 // Режим репетиции: сцена меняется каждые N секунд, не дожидаясь нового трека.
 // Нужен только для локального просмотра, в эфире не используется.
@@ -59,9 +63,11 @@ const blocks = [...fs.readFileSync(videoFile, 'utf8').matchAll(/<script>([\s\S]*
 if (!blocks.length) fail(`в ${videoFile} нет inline-скрипта`);
 const videoCode = blocks.at(-1)[1];
 
-// Состояние музыки для режиссёра сцены: генератор игр читает его через
-// globalThis.getMusicState() и по нему выбирает жанр следующей сцены.
-const musicState = { mood: null, bpm: null, kit: null, key: null, scale: null, track: 0 };
+// Состояние музыки для режиссёра сцены: сцена читает его через
+// globalThis.getMusicState() и по нему выбирает, какую сцену собрать.
+// seed — сид прогона: сцена берёт его солью, чтобы улицы различались между
+// запусками и при этом были воспроизводимы внутри одного прогона.
+const musicState = { mood: null, bpm: null, kit: null, key: null, scale: null, track: 0, seed: SEED };
 globalThis.getMusicState = () => musicState;
 
 const canvas = createCanvas(W, H);
@@ -179,7 +185,8 @@ const FRAME_BYTES = W * H * 4;
 const TICK_MS = 4;
 // Потолок буфера видео: выше — кадры пропускаем, чтобы не съесть память.
 const MAX_BUFFERED_FRAMES = 15;
-const AUDIO_BURST = SAMPLES_PER_FRAME * 4;
+// Окно, по которому меряем настоящую частоту кадров для плашки «слабый сигнал».
+const SIGNAL_WIN_MS = 1000;
 
 let videoSocket = null;
 let audioSocket = null;
@@ -188,7 +195,19 @@ let audioStartedAt = 0;
 let sentFrames = 0;
 let sentSamples = 0;
 let droppedFrames = 0;
-let lastReport = 0;
+let repeats = 0;
+// Кадры, которые машина успела нарисовать (без повторов) — по ним считаем
+// настоящую частоту и решаем, слабый ли сигнал у камеры.
+let freshFrames = 0;
+let sigMark = 0;
+let sigFresh = 0;
+let weakSignal = 0;
+let peakFps = 0;
+let frameErrors = 0;
+let lastFrame = null;
+// Отчёт раз в минуту. Часы заводим сразу: иначе первый тик (он идёт ещё до
+// подключения FFmpeg) печатал бы в лог строку про полтора миллиарда секунд.
+let lastReport = Date.now();
 let ticks = 0;
 let videoMs = 0;
 let audioMs = 0;
@@ -203,11 +222,43 @@ function emitVideo(now) {
   // событий и снова заморил бы звук.
   const limit = Math.min(want, sentFrames + 3);
   while (sentFrames < limit) {
+    // В rawvideo у кадра нет своей метки времени: FFmpeg считает время по
+    // счёту прочитанных кадров. Значит, за каждую секунду обязано уйти ровно
+    // FPS кадров — иначе видео отстанет от звука, который идёт по реальному
+    // времени. Если машина не успевает рисовать, повторяем прошлый кадр:
+    // движение на миг замирает, но эфир остаётся ровным.
+    if (lastFrame && want - sentFrames > 1) {
+      sentFrames++;
+      repeats++;
+      // Повтор занимает в эфире столько же времени, сколько занял бы
+      // нарисованный кадр, поэтому и часы сцены двигаем на столько же. Иначе
+      // сцена шла бы медленнее музыки: при сорока процентах повторов улица
+      // живёт за час всего сорок минут, а сутки в кадре длятся не тридцать
+      // минут, а все пятьдесят.
+      clockMs += FRAME_MS;
+      if (videoSocket.writableLength <= MAX_BUFFERED_FRAMES * FRAME_BYTES) {
+        videoSocket.write(lastFrame);
+      }
+      continue;
+    }
+
     const cb = pendingFrame;
     pendingFrame = null;
-    cb(clockMs);                       // нарисовать следующий кадр пейзажа
+    try {
+      cb(clockMs);                     // нарисовать следующий кадр пейзажа
+    } catch (error) {
+      // Сцена большая, и на пяти часах редкая ветка однажды да сломается.
+      // Один плохой кадр не должен глушить эфир: пишем причину и просим
+      // следующий кадр у той же функции.
+      frameErrors++;
+      if (frameErrors === 1) {
+        process.stderr.write(`source: кадр сорвался — ${(error && error.stack) || error}\n`);
+      }
+      if (pendingFrame === null) pendingFrame = cb;
+    }
     clockMs += FRAME_MS;
     sentFrames++;
+    freshFrames++;
 
     if (videoSocket.writableLength > MAX_BUFFERED_FRAMES * FRAME_BYTES) {
       droppedFrames++;                 // сокет забит — кадр пропускаем
@@ -217,7 +268,8 @@ function emitVideo(now) {
     // кадром, поэтому копируем: сокет пишет асинхронно, и без копии в очередь
     // уйдёт уже испорченный кадр. getImageData() тут не годится — он втрое
     // дороже бюджета кадра.
-    videoSocket.write(Buffer.from(canvas.data()));
+    lastFrame = Buffer.from(canvas.data());
+    videoSocket.write(lastFrame);
   }
 }
 
@@ -252,6 +304,24 @@ function tick() {
   audioMs += t2 - t1;
   const now = t2;
 
+  // Слабый сигнал: сколько кадров машина рисует на самом деле. Половину
+  // считаем не от номинала калибровки — та меряет частоту до запуска FFmpeg,
+  // который потом ест те же ядра, и номинал выходит завышенным. Берём лучшее,
+  // что машина вытягивала за последние минуты, и медленно оседаем, чтобы
+  // разовая просадка не задирала порог на весь эфир. Опускаем плашку позже,
+  // чем поднимаем (на пятую часть выше), иначе на самой границе она мигала бы
+  // каждый замер.
+  if (videoStartedAt && now - sigMark >= SIGNAL_WIN_MS) {
+    const liveFps = ((freshFrames - sigFresh) * 1000) / (now - sigMark);
+    sigMark = now;
+    sigFresh = freshFrames;
+    peakFps = Math.max(liveFps, peakFps * 0.995);
+    const half = Math.min(FPS, peakFps) * 0.5;
+    if (!weakSignal && liveFps < half) weakSignal = 1;
+    else if (weakSignal && liveFps > half * 1.2) weakSignal = 0;
+    globalThis.WEAK_SIGNAL = weakSignal;
+  }
+
   if (now - lastReport >= 60000) {
     const span = now - lastReport;
     lastReport = now;
@@ -260,7 +330,8 @@ function tick() {
     process.stderr.write(
       `source: тиков ${ticks} за ${(span / 1000).toFixed(0)} с, `
       + `видео ${videoMs} мс, звук ${audioMs} мс, `
-      + `кадров ${sentFrames}/${(videoReal * FPS).toFixed(0)} (пропущено ${droppedFrames}), `
+      + `кадров ${sentFrames}/${(videoReal * FPS).toFixed(0)} `
+      + `(повторов ${repeats}, пропущено ${droppedFrames}), `
       + `звук ${(sentSamples / SR).toFixed(1)} из ${audioReal.toFixed(1)} с, `
       + `в буфере ${(videoSocket ? videoSocket.writableLength / 1048576 : 0).toFixed(0)} МБ, `
       + `трек ${generator.kitName ?? '?'} ${generator.bpm ?? '?'} bpm\n`,
@@ -268,6 +339,46 @@ function tick() {
     ticks = 0; videoMs = 0; audioMs = 0;
   }
   setTimeout(tick, TICK_MS);
+}
+
+// ============================================================
+//  ЧАСТОТА КАДРОВ: сколько эта машина рисует на самом деле.
+//
+//  Объявлять её обязательно до старта FFmpeg: в rawvideo у кадра нет метки
+//  времени, FFmpeg считает время по счёту кадров, и если источник пойдёт
+//  медленнее объявленного, видео уедет от звука. Поэтому меряем здесь.
+//
+//  Мерить надо вместе со звуком: рисование и радио живут в одном потоке, и
+//  звук забирает около четверти времени. Первые кадры дорогие — V8 прогревает
+//  рисование, Skia собирает кэши, страница строит мир, — поэтому берём медиану
+//  уже разогретых кадров и оставляем небольшой запас на кодировщик, который
+//  будет работать рядом.
+// ============================================================
+{
+  const CAL_WARMUP = 40;
+  const CAL_FRAMES = 60;
+  const times = [];
+  for (let i = 0; i < CAL_WARMUP + CAL_FRAMES; i++) {
+    const cb = pendingFrame;
+    pendingFrame = null;
+    const t0 = process.hrtime.bigint();
+    cb(clockMs);                       // нарисовать кадр
+    clockMs += 1000 / TARGET_FPS;
+    Buffer.from(canvas.data());        // и прочитать пиксели, как в эфире
+    const frameMs = Number(process.hrtime.bigint() - t0) / 1e6;
+    renderAudio(Math.round((SR * frameMs) / 1000));   // звук за тот же отрезок
+    if (i >= CAL_WARMUP) times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+  }
+  times.sort((a, b) => a - b);
+  const median = times[times.length >> 1];
+  FPS = Math.max(6, Math.min(TARGET_FPS, Math.floor(1000 / (median * 1.1))));
+  FRAME_MS = 1000 / FPS;
+  syncMusicState();
+  process.stderr.write(
+    `source: кадр ${median.toFixed(0)} мс вместе со звуком — рисую ${W}x${H}@${FPS}`
+    + (FPS < TARGET_FPS ? `, эфир ${TARGET_FPS}, кадры доберёт FFmpeg` : '')
+    + '\n',
+  );
 }
 
 const videoServer = net.createServer((conn) => {
@@ -278,6 +389,7 @@ const videoServer = net.createServer((conn) => {
   conn.on('close', () => process.exit(0));
   videoStartedAt = Date.now();
   lastReport = videoStartedAt;
+  sigMark = videoStartedAt;            // окно замера частоты считаем от старта
   process.stderr.write(`source: видео подключено, рисую ${W}x${H}@${FPS} (seed ${SEED})\n`);
 });
 
@@ -304,7 +416,7 @@ audioServer.on('error', failSocket('звука'));
 let opened = 0;
 const announce = () => {
   if (++opened === 2) {
-    process.stderr.write(`ready ${videoServer.address().port} ${audioServer.address().port}\n`);
+    process.stderr.write(`ready ${videoServer.address().port} ${audioServer.address().port} ${FPS}\n`);
     tick();
   }
 };
