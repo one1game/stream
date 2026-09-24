@@ -23,6 +23,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { createCanvas } from '@napi-rs/canvas';
+import { createOfflineAudio } from './webaudio.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = Object.fromEntries(process.argv.slice(2).map((a) => {
@@ -53,8 +54,14 @@ if (args.genre) globalThis.SCENE_FORCE = String(args.genre);
 const fail = (msg) => { process.stderr.write(`stream_source: ${msg}\n`); process.exit(1); };
 
 // ============================================================
-//  ВИДЕО: reneratorvideo.html на Skia-канвасе
+//  ВИДЕО: сцена на Skia-канвасе
 // ============================================================
+// Чей звук идёт в эфир:
+//   radio — процедурное радио из radio/ (улица живёт под него);
+//   game  — звук самой сцены: она собирает его через Web Audio, а в эфире его
+//           сводит офлайн-движок scripts/webaudio.mjs.
+const AUDIO = String(args.audio || 'radio');
+
 const videoFile = path.join(ROOT, args.video || 'game_video.html');
 if (!fs.existsSync(videoFile)) fail(`нет файла ${videoFile}`);
 
@@ -72,101 +79,159 @@ globalThis.getMusicState = () => musicState;
 
 const canvas = createCanvas(W, H);
 canvas.style = {};                       // страница выставляет размер через CSS
+// Второй холст сцены: у игры в нём «вебка» стримера, и она кладёт её кадр
+// в общий. Без него сцена просит холст, которого в эфире нет.
+const sideCanvas = createCanvas(240, 240);
+sideCanvas.style = {};
 let pendingFrame = null;
 let clockMs = 0;
 
-const hudStub = () => ({
+const elementStub = () => ({
   innerHTML: '', textContent: '',
-  classList: { toggle() {}, add() {}, remove() {} },
+  style: {}, classList: { toggle() {}, add() {}, remove() {} },
+  addEventListener() {}, removeEventListener() {},
 });
-const hud = hudStub();
+// Слушатели страницы: сцена вешает на них разблокировку звука по первому
+// нажатию. В эфире нажимать некому, поэтому источник зовёт их сам.
+const pageListeners = {};
+
+const offlineAudio = AUDIO === 'game' ? createOfflineAudio(SR) : null;
 
 globalThis.document = {
-  getElementById: (id) => (id === 'c' ? canvas : hud),
+  getElementById: (id) => {
+    if (id === 'c' || id === 'game') return canvas;
+    if (id === 'streamerCanvas') return sideCanvas;
+    return elementStub();
+  },
   createElement: () => { const c = createCanvas(1, 1); c.style = {}; return c; },
+  addEventListener: (type, fn) => { (pageListeners[type] ||= []).push(fn); },
 };
-globalThis.window = { innerWidth: W, innerHeight: H, addEventListener() {} };
+globalThis.window = {
+  innerWidth: W, innerHeight: H, addEventListener() {},
+  ...(offlineAudio ? { AudioContext: offlineAudio.AudioContext } : {}),
+};
+// Размер кадра сцена узнаёт у источника: улица к нему безразлична, а игра
+// строит от него всю раскладку.
+globalThis.STREAM_W = W;
+globalThis.STREAM_H = H;
 globalThis.performance = { now: () => clockMs };
 globalThis.requestAnimationFrame = (cb) => { pendingFrame = cb; };
 
 new Function(videoCode)();
-if (!pendingFrame) fail('скрипт пейзажа не запустил кадровый цикл');
+if (!pendingFrame) fail('сцена не запустила кадровый цикл');
+// «Нажатие», которым сцена включает свой звук.
+for (const fn of pageListeners.pointerdown || []) fn();
 
 // ============================================================
-//  ЗВУК: lofi-processor + mastering из radio/
+//  ЗВУК
+//
+//  radio — lofi-processor + mastering из radio/: улица живёт под этот эфир.
+//  game  — сцена сама собрала звук через Web Audio, и его сводит офлайн-движок
+//          (scripts/webaudio.mjs). Радио в этом случае не грузится вовсе.
 // ============================================================
-const radioDir = path.join(ROOT, 'radio');
-const registry = {};
-globalThis.sampleRate = SR;
-globalThis.currentTime = 0;
-globalThis.AudioWorkletProcessor = class {
-  constructor() {
-    this.port = { postMessage() {}, onmessage: null };
-  }
-};
-globalThis.registerProcessor = (name, cls) => { registry[name] = cls; };
+let syncMusicState = () => {};
+let audioReport = () => '';      // строка про звук в отчёте раз в минуту
+let renderAudio;
 
-for (const rel of ['lofi-processor.js', 'plugins/mastering.js']) {
-  const abs = path.join(radioDir, rel);
-  if (!fs.existsSync(abs)) fail(`нет файла ${abs}`);
-  vm.runInThisContext(fs.readFileSync(abs, 'utf8'), { filename: abs });
-}
-if (!registry['lofi-processor'] || !registry['mastering-processor']) {
-  fail('радио-движок не зарегистрировал процессоры');
-}
-
-const generator = new registry['lofi-processor']({
-  // oneShot не включаем: трек доигрывает — движок сам запускает следующий.
-  processorOptions: { seed: SEED, autoStart: true, mood: args.mood || undefined },
-});
-const mastering = new registry['mastering-processor']();
-
-// Смена трека — это вызов mkSession из restartTrack. Считаем их, чтобы сцена
-// менялась ровно тогда, когда радио начинает новый трек.
-let trackCount = 1;
-const baseMkSession = generator.mkSession.bind(generator);
-generator.mkSession = () => { trackCount++; return baseMkSession(); };
-const syncMusicState = () => {
-  musicState.mood = generator.mood ? generator.mood.name : null;
-  musicState.bpm = generator.bpm ?? null;
-  musicState.kit = generator.kitName ?? null;
-  musicState.key = generator.keyName ?? null;
-  musicState.scale = generator.scaleName ?? null;
-  musicState.track = trackCount;
-};
-syncMusicState();
-
-const blockL = new Float32Array(128);
-const blockR = new Float32Array(128);
-const outL = new Float32Array(128);
-const outR = new Float32Array(128);
-const sink = [[outL, outR]];
-let totalSamples = 0;
-let carryL = new Float32Array(0);
-let carryR = new Float32Array(0);
-
-function renderAudio(frames) {
-  const buffer = Buffer.allocUnsafe(frames * 8);
-  let written = 0;
-  while (written < frames) {
-    if (carryL.length === 0) {
-      globalThis.currentTime = totalSamples / SR;
-      generator.process([], [[blockL, blockR]]);
-      mastering.process([[blockL, blockR]], sink);
-      totalSamples += 128;
-      carryL = Float32Array.from(outL);
-      carryR = Float32Array.from(outR);
+if (AUDIO === 'game') {
+  // Игра микширует тихо: пик около 0.2, а фоновая музыка и того тише. Для
+  // эфира поднимаем уровень и мягко ограничиваем — выше порога сигнал
+  // загибается, а не срезается, поэтому выстрелы и монеты не трещат. Пяти
+  // хватает, чтобы пик встал на -0.4 dBFS: в потолок не упираемся, запас на
+  // перекодирование в AAC остаётся.
+  const GAME_GAIN = 5;
+  const GAME_LIMIT = 0.75;
+  const limitSample = (v) => {
+    const a = Math.abs(v);
+    if (a <= GAME_LIMIT) return v;
+    return Math.sign(v) * (GAME_LIMIT + (1 - GAME_LIMIT) * Math.tanh((a - GAME_LIMIT) / (1 - GAME_LIMIT)));
+  };
+  renderAudio = (frames) => {
+    const { left, right } = offlineAudio.render(frames);
+    const buffer = Buffer.allocUnsafe(frames * 8);
+    for (let i = 0; i < frames; i++) {
+      buffer.writeFloatLE(limitSample(left[i] * GAME_GAIN), i * 8);
+      buffer.writeFloatLE(limitSample(right[i] * GAME_GAIN), i * 8 + 4);
     }
-    const take = Math.min(frames - written, carryL.length);
-    for (let i = 0; i < take; i++) {
-      buffer.writeFloatLE(carryL[i], (written + i) * 8);
-      buffer.writeFloatLE(carryR[i], (written + i) * 8 + 4);
+    return buffer;
+  };
+  // Число узлов в звуковом графе игры: за пять часов оно не должно расти.
+  audioReport = () => `звук игры, узлов ${offlineAudio.nodeCount}`;
+} else {
+  const radioDir = path.join(ROOT, 'radio');
+  const registry = {};
+  globalThis.sampleRate = SR;
+  globalThis.currentTime = 0;
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { postMessage() {}, onmessage: null };
     }
-    carryL = carryL.subarray(take);
-    carryR = carryR.subarray(take);
-    written += take;
+  };
+  globalThis.registerProcessor = (name, cls) => { registry[name] = cls; };
+
+  for (const rel of ['lofi-processor.js', 'plugins/mastering.js']) {
+    const abs = path.join(radioDir, rel);
+    if (!fs.existsSync(abs)) fail(`нет файла ${abs}`);
+    vm.runInThisContext(fs.readFileSync(abs, 'utf8'), { filename: abs });
   }
-  return buffer;
+  if (!registry['lofi-processor'] || !registry['mastering-processor']) {
+    fail('радио-движок не зарегистрировал процессоры');
+  }
+
+  const generator = new registry['lofi-processor']({
+    // oneShot не включаем: трек доигрывает — движок сам запускает следующий.
+    processorOptions: { seed: SEED, autoStart: true, mood: args.mood || undefined },
+  });
+  const mastering = new registry['mastering-processor']();
+
+  // Смена трека — это вызов mkSession из restartTrack. Считаем их, чтобы сцена
+  // менялась ровно тогда, когда радио начинает новый трек.
+  let trackCount = 1;
+  const baseMkSession = generator.mkSession.bind(generator);
+  generator.mkSession = () => { trackCount++; return baseMkSession(); };
+  syncMusicState = () => {
+    musicState.mood = generator.mood ? generator.mood.name : null;
+    musicState.bpm = generator.bpm ?? null;
+    musicState.kit = generator.kitName ?? null;
+    musicState.key = generator.keyName ?? null;
+    musicState.scale = generator.scaleName ?? null;
+    musicState.track = trackCount;
+  };
+  syncMusicState();
+
+  const blockL = new Float32Array(128);
+  const blockR = new Float32Array(128);
+  const outL = new Float32Array(128);
+  const outR = new Float32Array(128);
+  const sink = [[outL, outR]];
+  let totalSamples = 0;
+  let carryL = new Float32Array(0);
+  let carryR = new Float32Array(0);
+
+  renderAudio = (frames) => {
+    const buffer = Buffer.allocUnsafe(frames * 8);
+    let written = 0;
+    while (written < frames) {
+      if (carryL.length === 0) {
+        globalThis.currentTime = totalSamples / SR;
+        generator.process([], [[blockL, blockR]]);
+        mastering.process([[blockL, blockR]], sink);
+        totalSamples += 128;
+        carryL = Float32Array.from(outL);
+        carryR = Float32Array.from(outR);
+      }
+      const take = Math.min(frames - written, carryL.length);
+      for (let i = 0; i < take; i++) {
+        buffer.writeFloatLE(carryL[i], (written + i) * 8);
+        buffer.writeFloatLE(carryR[i], (written + i) * 8 + 4);
+      }
+      carryL = carryL.subarray(take);
+      carryR = carryR.subarray(take);
+      written += take;
+    }
+    return buffer;
+  };
+  audioReport = () => `трек ${generator.kitName ?? '?'} ${generator.bpm ?? '?'} bpm`;
 }
 
 // ============================================================
@@ -334,7 +399,7 @@ function tick() {
       + `(повторов ${repeats}, пропущено ${droppedFrames}), `
       + `звук ${(sentSamples / SR).toFixed(1)} из ${audioReal.toFixed(1)} с, `
       + `в буфере ${(videoSocket ? videoSocket.writableLength / 1048576 : 0).toFixed(0)} МБ, `
-      + `трек ${generator.kitName ?? '?'} ${generator.bpm ?? '?'} bpm\n`,
+      + `${audioReport()}\n`,
     );
     ticks = 0; videoMs = 0; audioMs = 0;
   }

@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: "Длительность эфира в минутах. Лимит job'а — 360, скрипт сам обрежет эфир до 355 минут от старта job'а (запас на остановку и закрытие RTMP), поэтому по умолчанию 348."
+        description: "Длительность эфира в минутах. По умолчанию 300 — ровно столько идёт забег автоплатформера «стрим мухи» (muxa.html), так что финал игры ложится в конец эфира. Лимит job'а — 360, скрипт сам обрежет эфир до 355 минут от старта job'а."
         required: false
-        default: "348"
+        default: "300"
       quality:
         description: "light — 960x540, normal — 1280x720, high — 1920x1080 (на бесплатном раннере может не удержать 30 fps)"
         required: false
         default: "normal"
       video:
-        description: "Что показывать: newvideo.html — улица (живёт по музыке), game_video.html — генератор игр"
+        description: "Что показывать: newvideo.html — улица (живёт по музыке радио), muxa.html — авто-платформер «стрим мухи» со своим звуком, game_video.html — генератор игр"
         required: false
         default: "newvideo.html"
 

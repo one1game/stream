@@ -1,0 +1,2853 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Авто-платформер — стрим мухи</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    font-family: 'Courier New', monospace;
+    color: #eee;
+  }
+  #stage {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100vw; height: 56.25vw;
+    max-height: 100vh; max-width: 177.78vh;
+    background: #000;
+    box-shadow: 0 0 80px rgba(0,0,0,1);
+    overflow: hidden;
+  }
+  canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+  /* HUD, полоса прогресса и вебка мухи рисуются прямо в канвасе: в эфире
+     страницы нет, там есть только кадр, поэтому всё, что должен видеть
+     зритель, живёт на холсте, а не в разметке. */
+  #soundToggle {
+    position: absolute; top: 1.5%; right: 1.5%;
+    width: clamp(30px, 3.2vw, 46px); height: clamp(30px, 3.2vw, 46px);
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.25);
+    background: rgba(0,0,0,0.55);
+    color: #fff;
+    font-size: clamp(14px, 1.6vw, 20px);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 20;
+    box-shadow: 0 0 12px rgba(0,0,0,0.5);
+    transition: transform 0.15s ease, background 0.2s ease;
+  }
+  #soundToggle:hover { transform: scale(1.08); background: rgba(0,0,0,0.75); }
+  #soundToggle.muted { color: #888; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="1280" height="720"></canvas>
+
+  <!-- Муха рисуется сюда, а кадр с неё кладётся в общий холст: так вебка
+       стримера видна и в браузере, и в эфире, где страницы нет вовсе. -->
+  <canvas id="streamerCanvas" width="240" height="240"
+          style="position:absolute;left:-9999px;top:0"></canvas>
+
+  <button id="soundToggle" title="Включить/выключить звук">🔈</button>
+</div>
+
+<script>
+// ================================================================
+// ============ ОСНОВА ===========================================
+// ================================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+// Размер кадра задаёт хозяин: в браузере это 1280x720, в эфире — то, что
+// заказано у источника (1280x720 при normal, 960x540 при light). Игра
+// раскладывает всё от H, поэтому на другом размере кадр просто мельче.
+const W = globalThis.STREAM_W || 1280, H = globalThis.STREAM_H || 720;
+if (canvas.width !== W) canvas.width = W;
+if (canvas.height !== H) canvas.height = H;
+
+// Общий коэффициент темпа игры: 1 = как было, меньше = медленнее.
+// Скорость и прыжок масштабируются вместе с гравитацией так, чтобы
+// дальность и высота прыжка остались прежними — просто всё движется
+// более плавно и неторопливо, без поломки геометрии уровня.
+const TIME_K = 0.72;
+const GRAVITY = 0.9 * TIME_K * TIME_K;
+const GROUND_Y = H - 90;
+const JUMP_VEL = -18 * TIME_K;
+const PLAYER_SPEED = 5.5 * TIME_K;
+const PLAYER_BACK_SPEED = 4.0 * TIME_K;
+const ATTACK_TIME = 180;
+const ATTACK_CD = 300;
+const SEGMENT = 380;
+const STOMP_MIN_VEL = 3;
+const BULLET_SPEED = 16 * TIME_K;
+const BULLET_DAMAGE = 1;
+const BULLET_LIFE = 2000;
+const SHOOT_CD = 220;
+// Дальше этого стрелять уже нечего: снаряд теряет высоту и уходит в землю.
+// Раньше герой палил и по полтысячи пикселей — в кадре это выглядело как
+// выстрелы в пустоту (на прогоне: 58% пуль не попали ни во что).
+const SHOOT_RANGE = 420;
+const MAX_BULLETS = 30;
+const MAX_PARTICLES = 250;
+
+const INVULN_DURATION = 4000;
+const INFINITE_AMMO_DURATION = 7000;
+const DROP_INVULN_CHANCE = 0.15;
+const DROP_AMMO_CHANCE = 0.12;
+
+const BIOMES = [
+  { name: 'ЛУГ',     sky: ['#1a3a6b','#4a7bc4','#a8d4f0','#ffe0b2'], ground: '#7ac14a', grass: '#3d7a2d', dirt: '#6b4f30' },
+  { name: 'ПУСТЫНЯ', sky: ['#7a3a1a','#c88a3a','#f4d48a','#ffe0b2'], ground: '#e8c17a', grass: '#c8a15a', dirt: '#a87a4a' },
+  { name: 'ЛЬДЫ',    sky: ['#1a2a5a','#4a6ab4','#a8c8e8','#e0f0ff'], ground: '#d8ecf8', grass: '#a8d0e8', dirt: '#7a9ab8' },
+  { name: 'ВУЛКАН',  sky: ['#2a0a0a','#6a1a1a','#a83a2a','#e87a3a'], ground: '#3a1a1a', grass: '#5a2a1a', dirt: '#2a0a0a' },
+  { name: 'ЛЕС',     sky: ['#1a3a2a','#3a6a4a','#7aa88a','#c8e8d0'], ground: '#5a9a4a', grass: '#2d6b2d', dirt: '#4a3a1a' },
+  { name: 'НОЧЬ',    sky: ['#0a0a1a','#1a1a4a','#3a3a7a','#5a5a9a'], ground: '#3a4a6a', grass: '#2a3a4a', dirt: '#1a2a3a' }
+];
+const BIOME_LENGTH = 25;
+
+let cameraX = 0;
+const world = {
+  platforms: [], enemies: [], coins: [], particles: [],
+  decorations: [], hazards: [], bullets: [], drops: []
+};
+let generatedUpTo = 0;
+let currentBiome = 0;
+
+const player = {
+  x: 140, y: GROUND_Y - 60, w: 36, h: 60,
+  vx: 0, vy: 0, onGround: true, facing: 1,
+  hp: 100, maxHp: 100,
+  jumps: 0, kills: 0, coinsCollected: 0,
+  ammo: 0, shootCooldown: 0,
+  attacking: false, attackTimer: 0, attackCooldown: 0,
+  invuln: 0, animation: 0, state: 'run',
+  doubleJumpUsed: false, doubleJumpPending: false,
+  combo: 0, comboTimer: 0,
+  stuckTimer: 0, lastX: 140,
+  stompCooldown: 0,
+  movementMode: 'forward', holdTimer: 0, retreatUntil: 0,
+  invulnBuffUntil: 0, infiniteAmmoUntil: 0
+};
+
+const blimp = {
+  x: 0, y: 130, offsetX: 0.28, offsetY: 0.15,
+  scale: 0.75, drift: 0, anchorSide: 'left'
+};
+
+let distance = 0;
+let startTime = performance.now();
+let finished = false;
+const TOTAL_SECONDS = 5 * 60 * 60;
+
+// ================================================================
+// ============ МОЗГ ==============================================
+// ================================================================
+const Brain = {
+  experience: 0, deaths: 0, totalKills: 0,
+  deathMemory: {},
+  // Сводка смертей по отрезкам (номер отрезка -> сумма severity). По ней
+  // riskAt смотрит риск места одним обращением, а не перебором всех ключей.
+  deathSeg: {},
+  enemyIntel: {
+    walker: { deaths: 0, kills: 0 },
+    slime:  { deaths: 0, kills: 0 },
+    flyer:  { deaths: 0, kills: 0 }
+  },
+  sense: { enemies: [], enemiesBehind: [], hazards: [], coins: [], coinsBehind: [], lastScan: 0 },
+  route: { waypoints: [], currentIndex: 0, lastBuildX: 0 },
+  plan: { tactic: 'hunt', goal: '', risk: 0, confidence: 0, mode: 'patrol', currentWaypoint: null, movement: 'forward', action: 'idle', value: 0 },
+  skill: {
+    level: 0, name: 'новичок',
+    reactionTime: 100, lookahead: 4, jumpAccuracy: 0.86, combatIQ: 0.6,
+    perfectionism: 0.6, shootIQ: 0.5, routeDepth: 8, routeDistance: 1100,
+    survivalIQ: 0.55, dodgeIQ: 0.55, predictionDepth: 36, mathPrecision: 0.65
+  },
+  cooldowns: { jump: 0, attack: 0, think: 0, buildRoute: 0, emergencyJump: 0 },
+  stats: {
+    perfectStreak: 0, totalDamageTaken: 0, coinsTotal: 0, enemiesKilledTotal: 0,
+    stompKills: 0, shootKills: 0, swordKills: 0, longestCombo: 0,
+    nearDeaths: 0, dodges: 0, totalPredictions: 0, dropsInvuln: 0, dropsAmmo: 0
+  },
+  survival: {
+    fear: 0, dangerLevel: 0, hpDropRate: 0, damageEvents: [],
+    threats: [], fightOrFlight: 'neutral', emergencyMode: false, emergencyTimer: 0
+  },
+  math: { bestAction: null, bestValue: -Infinity, lastThinkTime: 0 }
+};
+
+let idleFrames = 0;
+
+// ================================================================
+// ============ УТИЛИТЫ ==========================================
+// ================================================================
+function rand(seed) {
+  const x = Math.sin(seed * 9301 + 49297) * 233280;
+  return x - Math.floor(x);
+}
+function getBiomeForIndex(i) { return Math.floor(i / BIOME_LENGTH) % BIOMES.length; }
+function now() { return performance.now(); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function hasInvulnBuff() { return player.invulnBuffUntil > now(); }
+function hasInfiniteAmmo() { return player.infiniteAmmoUntil > now(); }
+
+// ================================================================
+// ============ ЗВУК (процедурный, без внешних файлов) ===========
+// ================================================================
+const AudioEngine = (() => {
+  let ctx = null, master = null, musicGain = null, sfxGain = null;
+  let enabled = false;
+  let droneOsc = null, droneGain = null, droneFilter = null;
+  let musicTimer = null;
+  let biomeForMusic = -1;
+  let lastComboSound = 0;
+
+  const SCALES = [
+    [261.63, 293.66, 329.63, 392.00, 440.00],  // ЛУГ — светлая пентатоника
+    [220.00, 246.94, 277.18, 329.63, 369.99],  // ПУСТЫНЯ — знойная, с секундами
+    [246.94, 277.18, 311.13, 369.99, 415.30],  // ЛЬДЫ — холодная, звонкая
+    [196.00, 220.00, 233.08, 277.18, 311.13],  // ВУЛКАН — тревожная, тесная
+    [220.00, 246.94, 261.63, 329.63, 349.23],  // ЛЕС — мягкая
+    [174.61, 196.00, 207.65, 246.94, 261.63],  // НОЧЬ — низкая, зловещая
+  ];
+
+  function init() {
+    if (ctx) return;
+    try {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      master = ctx.createGain(); master.gain.value = 0.85; master.connect(ctx.destination);
+      // Фоновая музыка шла на 0.16 при громкости нот 0.05 — рядом с эффектами
+      // её не было слышно совсем. Подняли шину, не трогая баланс: дрон и ноты
+      // по-прежнему 1:1, теперь их просто слышно.
+      musicGain = ctx.createGain(); musicGain.gain.value = 0.5; musicGain.connect(master);
+      sfxGain = ctx.createGain(); sfxGain.gain.value = 1; sfxGain.connect(master);
+      // Это шины микшера: звуки приходят и уходят, а шины остаются. Офлайн-движку
+      // в эфире нужно знать, что их нельзя убирать как отработавшие. В браузере
+      // такого метода нет — и не надо.
+      if (ctx.__persistent) {
+        ctx.__persistent(master);
+        ctx.__persistent(musicGain);
+        ctx.__persistent(sfxGain);
+      }
+    } catch (e) { ctx = null; }
+  }
+
+  function tone(freq, dur, type, peak, slideTo) {
+    if (!ctx || !enabled) return;
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(Math.max(20, freq), t0);
+    if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.001, peak || 0.25), t0 + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(sfxGain);
+    osc.start(t0); osc.stop(t0 + dur + 0.03);
+  }
+
+  function noiseBurst(dur, peak, filterFreq, type) {
+    if (!ctx || !enabled) return;
+    const t0 = ctx.currentTime;
+    const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buffer = ctx.createBuffer(1, n, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = ctx.createBufferSource(); src.buffer = buffer;
+    const filt = ctx.createBiquadFilter();
+    filt.type = type || 'bandpass';
+    filt.frequency.value = filterFreq || 1200;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(peak || 0.25, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(filt); filt.connect(g); g.connect(sfxGain);
+    src.start(t0);
+  }
+
+  function ensureDrone() {
+    if (droneOsc || !ctx) return;
+    droneOsc = ctx.createOscillator(); droneOsc.type = 'sine';
+    droneFilter = ctx.createBiquadFilter(); droneFilter.type = 'lowpass'; droneFilter.frequency.value = 500;
+    droneGain = ctx.createGain(); droneGain.gain.value = 0.05;
+    droneOsc.connect(droneFilter); droneFilter.connect(droneGain); droneGain.connect(musicGain);
+    droneOsc.frequency.value = SCALES[0][0] / 2;
+    if (ctx.__persistent) ctx.__persistent(droneGain);   // тоже шина, а не разовый звук
+    droneOsc.start();
+  }
+
+  function scheduleMusic() {
+    clearInterval(musicTimer);
+    musicTimer = setInterval(() => {
+      if (!enabled || !ctx) return;
+      const scale = SCALES[currentBiome % SCALES.length] || SCALES[0];
+      const danger = Brain.survival.fear;
+      if (Math.random() < 0.82) {
+        const note = scale[Math.floor(Math.random() * scale.length)] * (Math.random() < 0.12 ? 2 : 1);
+        tone(note, 0.55 + Math.random() * 0.3, 'triangle', 0.05 + danger * 0.03, note * 0.998);
+      }
+      if (droneFilter) droneFilter.frequency.setTargetAtTime(400 + danger * 900, ctx.currentTime, 0.4);
+    }, 420 - Brain.survival.fear * 160);
+  }
+
+  function onBiomeChanged() {
+    if (!ctx) return;
+    if (biomeForMusic === currentBiome) return;
+    biomeForMusic = currentBiome;
+    ensureDrone();
+    const scale = SCALES[currentBiome % SCALES.length] || SCALES[0];
+    droneOsc.frequency.exponentialRampToValueAtTime(scale[0] / 2, ctx.currentTime + 1.4);
+    scheduleMusic();
+    tone(scale[0], 0.5, 'sine', 0.12, scale[2]);
+  }
+
+  function resume() {
+    init();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+    enabled = true;
+    ensureDrone();
+    scheduleMusic();
+  }
+
+  function toggle() {
+    if (!enabled) { resume(); return true; }
+    enabled = false;
+    if (ctx) ctx.suspend();
+    clearInterval(musicTimer);
+    return false;
+  }
+
+  return {
+    resume, toggle,
+    get enabled() { return enabled; },
+    jump() { tone(420, 0.11, 'square', 0.18, 720); },
+    doubleJump() { tone(600, 0.13, 'square', 0.18, 980); },
+    shoot() { tone(950, 0.06, 'sawtooth', 0.12, 280); },
+    hit() { noiseBurst(0.07, 0.18, 1800); },
+    stomp() { tone(190, 0.09, 'square', 0.25, 55); },
+    sword() { noiseBurst(0.06, 0.2, 3200, 'highpass'); },
+    kill(type) {
+      tone(type === 'flyer' ? 540 : 260, 0.2, 'triangle', 0.22, type === 'flyer' ? 180 : 85);
+      noiseBurst(0.05, 0.12, 2400);
+    },
+    coin() {
+      tone(880, 0.07, 'square', 0.14);
+      setTimeout(() => tone(1320, 0.1, 'square', 0.13), 55);
+    },
+    hurt() { tone(150, 0.16, 'sawtooth', 0.24, 55); noiseBurst(0.1, 0.16, 500, 'lowpass'); },
+    death() { tone(320, 0.55, 'sine', 0.26, 45); },
+    combo(n) {
+      const t = now();
+      if (t - lastComboSound < 80) return;
+      lastComboSound = t;
+      tone(520 + n * 45, 0.09, 'square', 0.16, 760 + n * 45);
+    },
+    buff() { [0, 1, 2].forEach(i => setTimeout(() => tone(660 + i * 220, 0.12, 'sine', 0.16), i * 70)); },
+    onBiomeChanged
+  };
+})();
+
+function speakReaction(text) {
+  if (!AudioEngine.enabled || !('speechSynthesis' in window) || !text) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ru-RU';
+    u.pitch = 1.85;
+    u.rate = 1.25;
+    u.volume = 0.55;
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+// ================================================================
+// ============ ГЕНЕРАЦИЯ =========================================
+// ================================================================
+function generateSegment(index) {
+  const baseX = index * SEGMENT;
+  const r1 = rand(index * 7 + 1);
+  const r2 = rand(index * 13 + 3);
+  const r3 = rand(index * 19 + 5);
+  const r4 = rand(index * 23 + 7);
+  const biomeIdx = getBiomeForIndex(index);
+
+  if (index < 3) {
+    world.platforms.push({ x: baseX, y: GROUND_Y, w: SEGMENT, h: 200, ground: true, biome: biomeIdx });
+    world.coins.push({ x: baseX + 200, y: GROUND_Y - 50, r: 10, taken: false, anim: 0 });
+    return;
+  }
+
+  world.platforms.push({ x: baseX, y: GROUND_Y, w: SEGMENT, h: 200, ground: true, biome: biomeIdx });
+  const type = Math.floor(r1 * 7);
+
+  if (type === 0) {
+    for (let i = 0; i < 3; i++) world.coins.push({ x: baseX + 100 + i * 80, y: GROUND_Y - 60 - (i % 2) * 30, r: 10, taken: false, anim: 0 });
+  } else if (type === 1) {
+    const ph = 120 + r2 * 40;
+    world.platforms.push({ x: baseX + 110, y: GROUND_Y - ph, w: 130, h: 20, ground: false, biome: biomeIdx });
+    world.coins.push({ x: baseX + 160, y: GROUND_Y - ph - 40, r: 10, taken: false, anim: 0 });
+    world.coins.push({ x: baseX + 280, y: GROUND_Y - 50, r: 10, taken: false, anim: 0 });
+  } else if (type === 2) {
+    world.platforms.push({ x: baseX + 100, y: GROUND_Y - 60, w: 90, h: 18, ground: false, biome: biomeIdx });
+    world.platforms.push({ x: baseX + 220, y: GROUND_Y - 110, w: 90, h: 18, ground: false, biome: biomeIdx });
+    world.coins.push({ x: baseX + 145, y: GROUND_Y - 100, r: 10, taken: false, anim: 0 });
+    world.coins.push({ x: baseX + 265, y: GROUND_Y - 150, r: 10, taken: false, anim: 0 });
+  } else if (type === 3) {
+    const cnt = r2 > 0.6 ? 2 : 1;
+    for (let i = 0; i < cnt; i++) {
+      const hx = baseX + 90 + i * 140 + r3 * 20;
+      world.hazards.push({
+        x: hx, y: GROUND_Y - 22, w: 44, h: 22,
+        type: BIOMES[biomeIdx].name === 'ВУЛКАН' ? 'lava' :
+              BIOMES[biomeIdx].name === 'ЛЬДЫ' ? 'ice' :
+              BIOMES[biomeIdx].name === 'ПУСТЫНЯ' ? 'sand' : 'spike',
+        anim: rand(i * index) * 6
+      });
+    }
+    world.coins.push({ x: baseX + SEGMENT - 60, y: GROUND_Y - 50, r: 10, taken: false, anim: 0 });
+  } else if (type === 4) {
+    const heights = [80, 150];
+    for (let i = 0; i < 2; i++) {
+      world.platforms.push({ x: baseX + 80 + i * 130, y: GROUND_Y - heights[i], w: 80, h: 18, ground: false, biome: biomeIdx });
+      world.coins.push({ x: baseX + 120 + i * 130, y: GROUND_Y - heights[i] - 35, r: 10, taken: false, anim: 0 });
+    }
+    world.coins.push({ x: baseX + 300, y: GROUND_Y - 50, r: 10, taken: false, anim: 0 });
+  } else if (type === 5) {
+    world.platforms.push({ x: baseX + 80, y: GROUND_Y - 70, w: 100, h: 18, ground: false, biome: biomeIdx });
+    world.platforms.push({ x: baseX + 200, y: GROUND_Y - 120, w: 100, h: 18, ground: false, biome: biomeIdx });
+    world.platforms.push({ x: baseX + 130, y: GROUND_Y - 180, w: 100, h: 18, ground: false, biome: biomeIdx });
+    world.coins.push({ x: baseX + 130, y: GROUND_Y - 110, r: 10, taken: false, anim: 0 });
+    world.coins.push({ x: baseX + 250, y: GROUND_Y - 160, r: 10, taken: false, anim: 0 });
+    world.coins.push({ x: baseX + 180, y: GROUND_Y - 220, r: 10, taken: false, anim: 0 });
+  } else {
+    const stepH = 40 + r3 * 20;
+    world.platforms.push({ x: baseX + SEGMENT * 0.55, y: GROUND_Y - stepH, w: SEGMENT * 0.45, h: stepH, ground: true, biome: biomeIdx });
+    world.coins.push({ x: baseX + SEGMENT * 0.7, y: GROUND_Y - stepH - 40, r: 10, taken: false, anim: 0 });
+  }
+
+  if (type !== 0 && r4 > 0.35) {
+    // В сегменте с холмом враг встаёт до холма: на самой вершине его патруль
+    // (±90 px) не помещается, он сразу сходит с холма и обратно уже не поднимется.
+    const enemyX = type === 6 ? baseX + 70 + r2 * 60 : baseX + SEGMENT * 0.55 + r2 * 40;
+    let enemyType = 'walker';
+    const roll = r2 + r3;
+    if (roll > 1.4) enemyType = 'flyer';
+    else if (roll > 0.8) enemyType = 'slime';
+    world.enemies.push(makeEnemy(enemyX, GROUND_Y, enemyType, index, biomeIdx));
+  }
+  if (index > 3 && r4 > 0.7) {
+    world.enemies.push(makeEnemy(baseX + 80, GROUND_Y, 'slime', index + 500, biomeIdx));
+  }
+
+  if (r3 > 0.5) {
+    const decX = baseX + 40 + r2 * 200;
+    world.decorations.push({
+      type: BIOMES[biomeIdx].name === 'ЛЕС' ? 'tree' :
+            BIOMES[biomeIdx].name === 'ПУСТЫНЯ' ? 'cactus' :
+            BIOMES[biomeIdx].name === 'ЛЬДЫ' ? 'ice' :
+            BIOMES[biomeIdx].name === 'ВУЛКАН' ? 'rock' : 'bush',
+      // Ставим на землю под собой: в сегменте с холмом это его вершина, иначе
+      // дерево уходило в холм по пояс.
+      x: decX, y: floorYAt(decX, GROUND_Y), scale: 0.85 + r3 * 0.4, biome: biomeIdx
+    });
+  }
+}
+
+function makeEnemy(x, groundY, type, seed, biomeIdx) {
+  const r = rand(seed);
+  // Рост у всех разный, поэтому и посадка на землю у всех своя: раньше все
+  // рождались с одной поправкой −50, и у ходока (рост 54) ноги оказывались на
+  // четыре пикселя в земле. Посадка сверху такое не ловит — он проваливался
+  // сквозь пол и в кадре не появлялся вовсе.
+  const base = { x, alive: true, hurtFlash: 0, anim: r * 6, biome: biomeIdx, vx: 0, vy: 0, type };
+  if (type === 'walker') {
+    return Object.assign({}, base, { y: groundY - 54, w: 40, h: 54, vx: (r > 0.5 ? 1.4 : -1.4) * TIME_K, hp: 2, maxHp: 2, patrolMin: x - 90, patrolMax: x + 90, jumpTimer: rand(seed * 3) * 200 });
+  } else if (type === 'slime') {
+    return Object.assign({}, base, { y: groundY - 38, w: 46, h: 38, hp: 1, maxHp: 1 });
+  } else {
+    return Object.assign({}, base, { y: groundY - 34, w: 44, h: 34, hp: 2, maxHp: 2, baseY: groundY - 150, flyPhase: rand(seed * 5) * Math.PI * 2, flyAmp: 25 + r * 20, homing: r > 0.6 });
+  }
+}
+
+function ensureGenerated(untilX) {
+  let safety = 0;
+  while (generatedUpTo < untilX) {
+    generateSegment(Math.floor(generatedUpTo / SEGMENT));
+    generatedUpTo += SEGMENT;
+    if (++safety > 200) break;
+  }
+}
+
+// ================================================================
+// ============ УБОРКА МИРА ПОЗАДИ ИГРОКА =========================
+// ================================================================
+// Игра — однонаправленный скроллер: всё, что осталось далеко позади,
+// больше никогда не понадобится. Без этой очистки массивы платформ,
+// врагов, монет и опасностей растут бесконечно все 5 часов стрима,
+// и физика/ИИ каждый кадр перебирают их целиком — отсюда и замедление.
+function currentBiomeStartX() {
+  const segIndex = Math.floor(player.x / SEGMENT);
+  let startSeg = segIndex - (segIndex % BIOME_LENGTH);
+  if (startSeg < 3) startSeg = 3;
+  return startSeg * SEGMENT;
+}
+function pruneFront(arr, getRight, cut) {
+  let i = 0;
+  while (i < arr.length && getRight(arr[i]) < cut) i++;
+  if (i > 0) arr.splice(0, i);
+}
+let lastPruneX = 0;
+function pruneWorld() {
+  if (player.x - lastPruneX < 200) return; // не чаще раза в ~200px пути
+  lastPruneX = player.x;
+  // Никогда не трогаем то, что ещё видно в кадре, и то, что нужно
+  // для респавна в начале текущего биома (на случай смерти).
+  const cut = Math.min(cameraX - 200, currentBiomeStartX() - 50);
+  pruneFront(world.platforms, p => p.x + p.w, cut);
+  pruneFront(world.enemies, e => e.x + e.w, cut);
+  pruneFront(world.coins, c => c.x + c.r, cut);
+  pruneFront(world.hazards, h => h.x + h.w, cut);
+  pruneFront(world.decorations, d => d.x + 60, cut);
+  // Память о смертях тоже не должна расти бесконечно
+  const keys = Object.keys(Brain.deathMemory);
+  if (keys.length > 150) {
+    const cutIdx = cut / 100;
+    for (const k of keys) if (Brain.deathMemory[k].seg < cutIdx) delete Brain.deathMemory[k];
+    // Сводку по отрезкам пересобираем из того, что осталось.
+    Brain.deathSeg = {};
+    for (const k in Brain.deathMemory) {
+      const m = Brain.deathMemory[k];
+      Brain.deathSeg[m.seg] = (Brain.deathSeg[m.seg] || 0) + m.severity;
+    }
+  }
+}
+
+// ================================================================
+// ============ ДРОПЫ ============================================
+// ================================================================
+function spawnDrop(x, y) {
+  if (world.drops.length >= 6) return;
+  const roll = Math.random();
+  if (roll < DROP_INVULN_CHANCE) {
+    world.drops.push({ type: 'invuln', x, y, vx: (Math.random() - 0.5) * 3, vy: -4, life: 8000, maxLife: 8000, anim: 0, r: 14 });
+    return;
+  }
+  if (roll < DROP_INVULN_CHANCE + DROP_AMMO_CHANCE) {
+    world.drops.push({ type: 'infinite_ammo', x, y, vx: (Math.random() - 0.5) * 3, vy: -4, life: 8000, maxLife: 8000, anim: 0, r: 14 });
+  }
+}
+
+function applyDrop(drop) {
+  AudioEngine.buff();
+  if (drop.type === 'invuln') {
+    player.invulnBuffUntil = now() + INVULN_DURATION;
+    player.invuln = Math.max(player.invuln, INVULN_DURATION);
+    Brain.stats.dropsInvuln++;
+    for (let i = 0; i < 20; i++) spawnParticles(drop.x, drop.y, '#4fc3f7', 1);
+  } else if (drop.type === 'infinite_ammo') {
+    player.infiniteAmmoUntil = now() + INFINITE_AMMO_DURATION;
+    Brain.stats.dropsAmmo++;
+    for (let i = 0; i < 20; i++) spawnParticles(drop.x, drop.y, '#ffd93d', 1);
+  }
+}
+
+// ================================================================
+// ============ ФИЗИКА / ПРЕДСКАЗАНИЕ / РИСК =====================
+// ================================================================
+// Есть ли под точкой земля на уровне ног (или чуть ниже). Раньше проверялось
+// «есть ли ЛЮБАЯ платформа, чей верх выше ног на 20 пикселей»: в прыжке над
+// землёй такое условие не выполнялось, и riskAt за каждый кадр полёта капал
+// +20 риска. Из-за этого мозг считал прыжок смертельно опасным и шёл прямо в
+// холмы вместо прыжка. Теперь смотрим вниз: земля должна быть под ногами.
+function hasGroundAt(x, y) {
+  const feet = y + player.h;
+  for (const p of world.platforms) {
+    if (x < p.x || x > p.x + p.w) continue;
+    if (p.y >= feet - 4 && p.y <= feet + 400) return p;
+  }
+  return null;
+}
+
+// Верх земли под точкой. У холма он выше фонового GROUND_Y, и всё, что прыгает
+// «от земли», должно прыгать от своей земли — иначе слайм уходит в холм.
+function floorYAt(x, feetY) {
+  let top = GROUND_Y;
+  for (const p of world.platforms) {
+    if (!p.ground) continue;
+    if (x < p.x || x > p.x + p.w) continue;
+    if (p.y <= feetY + 2 && p.y < top) top = p.y;
+  }
+  return top;
+}
+
+function predictEnemyPrecise(e, frames) {
+  frames = clamp(frames, 1, 60);
+  let x = e.x, y = e.y;
+  let vx = e.vx || 0, vy = e.vy || 0;
+  const positions = [];
+  for (let f = 0; f < frames; f++) {
+    if (e.type === 'walker') {
+      x += vx;
+      if (x < e.patrolMin || x > e.patrolMax) vx *= -1;
+      vy += GRAVITY; y += vy;
+      for (const p of world.platforms) {
+        if (x + e.w > p.x && x < p.x + p.w) {
+          const bottom = y + e.h;
+          if (vy >= 0 && bottom >= p.y && bottom <= p.y + 3) { y = p.y - e.h; vy = 0; break; }
+        }
+      }
+      // Тот же боковой упор в холм, что и в update(): прогноз обязан совпадать
+      // с тем, как враг живёт на самом деле.
+      if (vy >= 0) {
+        for (const p of world.platforms) {
+          if (!p.ground) continue;
+          if (y + e.h <= p.y + 2) continue;
+          if (x + e.w <= p.x || x >= p.x + p.w) continue;
+          if (vx > 0) x = p.x - e.w; else if (vx < 0) x = p.x + p.w;
+          vx *= -1;
+          break;
+        }
+      }
+      if (e.jumpTimer - f * 16 <= 0 && vy === 0) vy = -12 * TIME_K;
+    } else if (e.type === 'slime') {
+      vy += GRAVITY; y += vy;
+      const floor = floorYAt(x, y + e.h);
+      if (y + e.h >= floor) { y = floor - e.h; vy = -9 * TIME_K; }
+      x += Math.sign(player.x - x) * 0.7 * TIME_K;
+    } else if (e.type === 'flyer') {
+      const fp = e.flyPhase + f * 0.05 * TIME_K;
+      y = e.baseY + Math.sin(fp) * e.flyAmp;
+      if (e.homing && Math.abs(x - player.x) < 400) {
+        const dx = player.x - x, dy = (player.y + 20) - y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        x += (dx / len) * 1.1 * TIME_K; y += (dy / len) * 0.5 * TIME_K;
+      } else x += Math.sin(f * 0.5) * 0.5 * TIME_K;
+    }
+    positions.push({ x, y, frame: f });
+  }
+  return { enemy: e, positions, frames };
+}
+
+// Куда враг уйдёт в следующие кадры. Прогноз не зависит от того, что мы
+// примеряем игроку: в нём двигается только враг, а игрок читается настоящий.
+// Значит, внутри одного планирования он один и тот же — а считался заново и
+// на каждом действии, и на каждом кадре симуляции, по разу на врага. Замер:
+// на прогнозы уходила половина всего счёта игры. Считаем один раз на проход и
+// держим срез на весь горизонт: кто читает — сам берёт нужный кадр.
+const PREDICT_FRAMES = 60;
+let predictPass = null;
+function enemyPath(e) {
+  if (!predictPass) return predictEnemyPrecise(e, PREDICT_FRAMES).positions;
+  let path = predictPass.get(e);
+  if (!path) {
+    path = predictEnemyPrecise(e, PREDICT_FRAMES).positions;
+    predictPass.set(e, path);
+  }
+  return path;
+}
+
+function predictWorld(frames) {
+  const capped = clamp(frames, 1, 60);
+  const out = [];
+  let count = 0;
+  for (const e of world.enemies) {
+    if (!e.alive) continue;
+    if (count++ > 25) break;
+    out.push({ enemy: e, positions: enemyPath(e), frames: capped });
+  }
+  return out;
+}
+
+function riskAt(x, y, timeFrame) {
+  let risk = 0;
+  const cx = x + player.w / 2, cy = y + player.h / 2;
+  const predictions = predictWorld(timeFrame);
+  for (const pred of predictions) {
+    const e = pred.enemy;
+    if (!e.alive) continue;
+    const idx = Math.min(timeFrame - 1, pred.positions.length - 1);
+    if (idx < 0) continue;
+    const p = pred.positions[idx];
+    const ex = p.x + e.w / 2, ey = p.y + e.h / 2;
+    const d = Math.sqrt((ex - cx) * (ex - cx) + (ey - cy) * (ey - cy));
+    if (d < 150) {
+      const prox = 1 - d / 150;
+      const dmg = e.type === 'walker' ? 12 : e.type === 'slime' ? 8 : 10;
+      risk += prox * prox * dmg * 1.2;
+    }
+  }
+  for (const h of world.hazards) {
+    const d = Math.hypot(h.x + h.w / 2 - cx, h.y + h.h / 2 - cy);
+    if (d < 100) risk += (1 - d / 100) * 15;
+  }
+  if (!hasGroundAt(cx + 20, y)) risk += 20;
+  // Память о смертях — по отрезку: riskAt зовётся десятки раз на каждый
+  // примеряемый ход, и перебор ключей со split'ом строк стоил дороже всей
+  // остальной оценки. Условие всё равно было «отрезок совпал», то есть выборка.
+  const segRisk = Brain.deathSeg[Math.round(cx / 100)];
+  if (segRisk) risk += segRisk * 4;
+  return risk;
+}
+
+// ================================================================
+// ============ СИМУЛЯЦИЯ И ПЛАНИРОВАНИЕ =========================
+// ================================================================
+function simulateAction(actionType, fromX, fromY, fromVy, fromOnGround) {
+  const result = {
+    type: actionType, safe: true, finalX: fromX, finalY: fromY, finalVy: fromVy,
+    framesSimulated: 0, risk: 0, maxRiskPoint: 0, enemiesHit: 0, coinsCollected: 0,
+    hpChange: 0, endGround: false, hitEnemies: [], pickedCoins: []
+  };
+  let duration = 0, vx = 0, vy = fromVy;
+  if (actionType === 'run') { vx = PLAYER_SPEED; duration = 15; }
+  else if (actionType === 'runBack') { vx = -PLAYER_BACK_SPEED; duration = 15; }
+  else if (actionType === 'wait') { vx = 0; duration = 15; }
+  else if (actionType === 'jump') { vx = PLAYER_SPEED; vy = JUMP_VEL; duration = 35; }
+  else if (actionType === 'jump_double') { vx = PLAYER_SPEED; vy = JUMP_VEL; duration = 45; }
+  else if (actionType === 'attack') { vx = 0; duration = 12; }
+
+  let x = fromX, y = fromY, onGround = fromOnGround, doubleJumped = false;
+  let totalRisk = 0, maxRisk = 0, hitEnemies = [], coinsPicked = [];
+  const invulnBuff = hasInvulnBuff() || player.invuln > 0;
+
+  for (let f = 0; f < duration; f++) {
+    const prevBottom = y + player.h;
+    if (actionType === 'jump_double' && !doubleJumped && vy > 0 && f < 25) { vy = JUMP_VEL * 0.85; doubleJumped = true; }
+    const prevVy = vy;
+    vy += GRAVITY; x += vx; y += vy;
+    const bottom = y + player.h;
+    let died = false;
+    for (const h of world.hazards) {
+      if (x + player.w > h.x && x < h.x + h.w && y + player.h > h.y && y < h.y + h.h) {
+        if (!invulnBuff) { result.safe = false; result.hpChange -= 18; died = true; }
+        break;
+      }
+    }
+    if (died) break;
+    for (const e of world.enemies) {
+      if (!e.alive) continue;
+      const path = enemyPath(e);
+      const idx = Math.min(f, path.length - 1);
+      if (idx < 0) continue;
+      const ep = path[idx];
+      if (x + player.w > ep.x && x < ep.x + e.w && y + player.h > ep.y && y < ep.y + e.h) {
+        const isFalling = prevVy > STOMP_MIN_VEL;
+        const comingFromAbove = prevBottom <= ep.y + 20;
+        if (isFalling && comingFromAbove && e.type !== 'flyer') {
+          if (!hitEnemies.find(h => h === e)) hitEnemies.push(e);
+        } else if (!invulnBuff) { result.safe = false; result.hpChange -= 10; }
+      }
+    }
+    if (onGround === false || vy >= 0) {
+      for (const p of world.platforms) {
+        if (x + player.w > p.x && x < p.x + p.w) {
+          if (vy >= 0 && prevBottom <= p.y + 2 && bottom >= p.y) { y = p.y - player.h; vy = 0; onGround = true; break; }
+        }
+      }
+    } else onGround = false;
+    // И упор в холм: без него примерка «идти» считала, что путь свободен, и
+    // герой шёл в холм, а не прыгал на него.
+    if (vy >= 0 && vx !== 0) {
+      for (const p of world.platforms) {
+        if (!p.ground) continue;
+        if (y + player.h <= p.y + 2) continue;
+        if (x + player.w <= p.x || x >= p.x + p.w) continue;
+        x = vx > 0 ? p.x - player.w : p.x + p.w;
+        break;
+      }
+    }
+    const r = riskAt(x, y, f + 1);
+    totalRisk += r;
+    if (r > maxRisk) maxRisk = r;
+    for (const c of world.coins) {
+      if (c.taken) continue;
+      if (coinsPicked.find(cc => cc === c)) continue;
+      const dx = (x + player.w / 2) - c.x, dy = (y + player.h / 2) - c.y;
+      if (dx * dx + dy * dy < 45 * 45) coinsPicked.push(c);
+    }
+    if (y > H + 300) { result.safe = false; result.hpChange -= 20; break; }
+    // Замах мечом примерка раньше не считала вовсе: прямоугольник атаки жил
+    // только в update, поэтому удар не имел веса и мозг его не выбирал.
+    if (actionType === 'attack' && f === (duration >> 1)) {
+      const ar = { x: x + player.w, y: y + 10, w: 60, h: player.h - 20 };
+      for (const en of world.enemies) {
+        if (!en.alive) continue;
+        if (rectsOverlap(ar, en) && !hitEnemies.find(h => h === en)) hitEnemies.push(en);
+      }
+    }
+    result.framesSimulated = f + 1;
+  }
+  result.finalX = x; result.finalY = y; result.finalVy = vy;
+  result.risk = totalRisk / Math.max(1, duration);
+  result.maxRiskPoint = maxRisk;
+  result.enemiesHit = hitEnemies.length;
+  result.coinsCollected = coinsPicked.length;
+  result.endGround = onGround;
+  result.hitEnemies = hitEnemies;
+  result.pickedCoins = coinsPicked;
+  return result;
+}
+
+function actionValue(simResult) {
+  if (!simResult.safe) return -1000;
+  const fear = Brain.survival.fear;
+  const hpRatio = player.hp / player.maxHp;
+  const hasInv = hasInvulnBuff();
+  let u = 0;
+  u += (simResult.finalX - player.x) * 0.1;
+  u += simResult.enemiesHit * 7;
+  u += simResult.coinsCollected * 2.2;
+  for (const e of simResult.hitEnemies || []) if (e.type !== 'flyer') u += 1.3;
+  u -= simResult.risk * 1.7;
+  u -= simResult.maxRiskPoint * 2.2;
+  u -= Math.abs(simResult.hpChange) * (2 + (1 - hpRatio) * 5);
+  u -= simResult.risk * fear * 3;
+  if (hpRatio < 0.3 && !hasInv) u -= simResult.risk * 4;
+  if (simResult.type === 'wait' && fear < 0.5) u -= 3;
+  if (simResult.type === 'runBack') { u -= 2; if (fear < 0.4) u -= 5; }
+  if ((simResult.type === 'jump' || simResult.type === 'jump_double') && simResult.enemiesHit === 0 && simResult.coinsCollected === 0) u -= 0.5;
+  if (simResult.type === 'attack' && !simResult.endGround && simResult.enemiesHit === 0) u -= 2;
+  if (hasInv) u += simResult.enemiesHit * 4;
+  return u;
+}
+
+function planBestAction() {
+  const n = now();
+  if (n - Brain.cooldowns.think < Brain.skill.reactionTime) return null;
+  Brain.cooldowns.think = n;
+  const actions = ['run', 'wait', 'jump'];
+  const enemiesAhead = Brain.sense.enemies.filter(e => e.e.x > player.x && e.dist < 250);
+  if (enemiesAhead.length > 0 && player.onGround) actions.push('runBack');
+  if (Brain.skill.level >= 1 && player.onGround) actions.push('jump_double');
+  const closestEnemy = Brain.sense.enemies[0];
+  if (closestEnemy && closestEnemy.dist < 95 && Brain.cooldowns.attack <= 0) actions.push('attack');
+
+  let bestAction = null, bestValue = -Infinity;
+  // Прогнозы врагов на весь проход — одни и те же для всех примеряемых
+  // действий, поэтому считаем их по разу и на выходе отпускаем.
+  predictPass = new Map();
+  try {
+    for (const actionType of actions) {
+      const sim = simulateAction(actionType, player.x, player.y, player.vy, player.onGround);
+      if (!sim.safe) continue;
+      let value = actionValue(sim);
+      if (idleFrames > 15) {
+        if (actionType === 'wait') value -= 15;
+        if (actionType === 'runBack') value -= 20;
+      }
+      if (idleFrames > 45) {
+        if (actionType === 'wait') value = -Infinity;
+        if (actionType === 'runBack') value = -Infinity;
+      }
+      if (idleFrames > 90) if (actionType !== 'run' && actionType !== 'jump') value = -Infinity;
+      const noThreat = Brain.sense.enemies.filter(e => e.dist < 150).length === 0 &&
+                       Brain.sense.hazards.filter(hz => hz.dx > -20 && hz.dx < 150).length === 0;
+      if (noThreat && actionType === 'run') value += 10;
+      if (noThreat && actionType === 'wait') value -= 5;
+      if (value > bestValue) { bestValue = value; bestAction = { type: actionType, sim, value }; }
+    }
+    if (!bestAction) {
+      // Ни одно действие не прошло примерку. Оставляем прежний выбор — «run»,
+      // но с честной оценкой: раньше наружу уходило -Infinity, и режим «всё
+      // плохо» выглядел в плане как «оценки нет».
+      const sim = simulateAction('run', player.x, player.y, player.vy, player.onGround);
+      bestValue = sim.safe ? actionValue(sim) : -50;
+      bestAction = { type: 'run', sim, value: bestValue };
+    }
+  } finally {
+    predictPass = null;
+  }
+  Brain.math.bestAction = bestAction;
+  Brain.math.bestValue = bestValue;
+  Brain.plan.value = bestValue;
+  Brain.plan.action = bestAction.type;
+  return bestAction;
+}
+
+// ================================================================
+// ============ ИНСТИНКТ / ВОСПРИЯТИЕ / МАРШРУТ ==================
+// ================================================================
+function updateSurvivalInstinct(dt) {
+  const S = Brain.survival;
+  const hpRatio = player.hp / player.maxHp;
+  S.damageEvents = S.damageEvents.filter(e => now() - e.time < 2000);
+  if (S.damageEvents.length > 15) S.damageEvents = S.damageEvents.slice(-10);
+  let recentDamage = 0;
+  for (const e of S.damageEvents) recentDamage += e.damage;
+  S.hpDropRate = recentDamage / 2;
+
+  S.threats = [];
+  let totalThreat = 0, count = 0;
+  for (const info of Brain.sense.enemies) {
+    if (count++ > 20) break;
+    if (info.dist > 300) continue;
+    const prox = 1 - info.dist / 300;
+    const approach = info.approachSpeed > 0 ? 1.3 : 1.0;
+    const severity = prox * info.dangerLevel * approach;
+    S.threats.push({ type: 'enemy', dist: info.dist, severity, info });
+    totalThreat += severity * 3;
+  }
+  for (const hz of Brain.sense.hazards) {
+    if (hz.dx < -20 || hz.dx > 200) continue;
+    const prox = 1 - Math.abs(hz.dx) / 200;
+    S.threats.push({ type: 'hazard', dist: hz.dx, severity: prox, info: hz });
+    totalThreat += prox * 5;
+  }
+  S.dangerLevel = Math.min(10, totalThreat);
+
+  let fear = 0;
+  fear += Math.min(1, S.dangerLevel / 6) * 0.3;
+  if (hpRatio < 0.7) fear += (1 - hpRatio / 0.7) * 0.4;
+  if (S.hpDropRate > 0) fear += Math.min(0.4, S.hpDropRate / 30);
+  const nearEnemies = Brain.sense.enemies.filter(e => e.dist < 150);
+  if (nearEnemies.length >= 3) fear += 0.2;
+  if (nearEnemies.length >= 5) fear += 0.2;
+  if (Brain.sense.enemies.filter(e => e.dist < 70).length > 0) fear += 0.15;
+  for (const hz of Brain.sense.hazards) if (hz.dx > -10 && hz.dx < 60) fear += 0.25;
+  if (hasInvulnBuff()) fear *= 0.3;
+  if (hasInfiniteAmmo()) fear *= 0.7;
+  S.fear = Math.max(0, Math.min(1, fear));
+  if (S.fear < 0.3) S.fightOrFlight = 'fight';
+  else if (S.fear < 0.65) S.fightOrFlight = 'neutral';
+  else S.fightOrFlight = 'flight';
+  if (S.fear > 0.75 && hpRatio < 0.5 && !hasInvulnBuff()) {
+    if (!S.emergencyMode) { S.emergencyMode = true; S.emergencyTimer = 1500; Brain.stats.nearDeaths++; }
+  }
+  if (S.emergencyMode) {
+    S.emergencyTimer -= dt;
+    if (S.emergencyTimer <= 0 || (hpRatio > 0.7 && S.dangerLevel < 3)) S.emergencyMode = false;
+  }
+  return false;
+}
+
+function sense() {
+  const n = now();
+  if (n - Brain.sense.lastScan < 30) return;
+  Brain.sense.lastScan = n;
+  const pC = player.x + player.w / 2, pY = player.y;
+  const eF = [], eB = [];
+  let count = 0;
+  for (const e of world.enemies) {
+    if (!e.alive) continue;
+    if (count++ > 50) break;
+    const dx = e.x + e.w / 2 - pC, dy = e.y + e.h / 2 - (pY + player.h / 2);
+    const dist = Math.hypot(dx, dy);
+    if (dist > 1000) continue;
+    const info = {
+      e, dx, dy, dist, hpRatio: e.hp / e.maxHp, type: e.type,
+      dangerLevel: Brain.enemyIntel[e.type].deaths > 0 ? 1.5 : 1.0,
+      stompable: e.type !== 'flyer',
+      approachSpeed: e.type === 'walker' ? (e.vx || 0) * Math.sign(pC - e.x) : 0
+    };
+    if (e.x > player.x) eF.push(info); else eB.push(info);
+  }
+  eF.sort((a, b) => a.dist - b.dist);
+  eB.sort((a, b) => a.dist - b.dist);
+  Brain.sense.enemies = eF;
+  Brain.sense.enemiesBehind = eB;
+  const cF = [], cB = [];
+  count = 0;
+  for (const c of world.coins) {
+    if (c.taken) continue;
+    if (count++ > 60) break;
+    const dx = c.x - pC;
+    if (Math.abs(dx) > 1000) continue;
+    const info = { c, dx, dist: Math.abs(dx) };
+    if (dx > 0) cF.push(info); else cB.push(info);
+  }
+  cF.sort((a, b) => a.dist - b.dist);
+  cB.sort((a, b) => a.dist - b.dist);
+  Brain.sense.coins = cF;
+  Brain.sense.coinsBehind = cB;
+  const hazards = [];
+  for (const h of world.hazards) {
+    const dx = h.x + h.w / 2 - pC;
+    if (dx > -80 && dx < 500) hazards.push({ h, dx });
+  }
+  Brain.sense.hazards = hazards;
+}
+
+function costToReach(fromX, fromY, targetX, targetY) {
+  const dx = Math.abs(targetX - fromX), dy = Math.abs(targetY - fromY);
+  let cost = dx / 100 + dy / 80;
+  for (const h of world.hazards) if (h.x + h.w > Math.min(fromX, targetX) && h.x < Math.max(fromX, targetX)) cost += 3;
+  return cost;
+}
+
+function buildRoute() {
+  const n = now();
+  if (n - Brain.cooldowns.buildRoute < 350) return;
+  Brain.cooldowns.buildRoute = n;
+  const startX = player.x + player.w, startY = player.y;
+  const maxDist = Brain.skill.routeDistance;
+  const targets = [];
+  const fear = Brain.survival.fear;
+  let count = 0;
+  for (const info of Brain.sense.enemies) {
+    if (count++ > 20) break;
+    if (info.e.x < startX || info.e.x > startX + maxDist) continue;
+    targets.push({
+      type: 'kill', x: info.e.x + info.e.w / 2, y: info.e.y + info.e.h / 2, target: info.e,
+      basePriority: Math.max(1, 10 + (1 - info.hpRatio) * 3 - fear * 8),
+      estimatedCost: costToReach(startX, startY, info.e.x, info.e.y)
+    });
+  }
+  count = 0;
+  for (const info of Brain.sense.coins) {
+    if (count++ > 25) break;
+    if (info.c.x < startX - 100 || info.c.x > startX + maxDist) continue;
+    targets.push({
+      type: 'coin', x: info.c.x, y: info.c.y, target: info.c,
+      basePriority: 5 + Brain.skill.perfectionism * 3,
+      estimatedCost: costToReach(startX, startY, info.c.x, info.c.y)
+    });
+  }
+  for (const drop of world.drops) {
+    if (drop.x < startX - 100 || drop.x > startX + maxDist) continue;
+    targets.push({
+      type: 'drop', x: drop.x, y: drop.y, target: drop,
+      basePriority: 25,
+      estimatedCost: costToReach(startX, startY, drop.x, drop.y)
+    });
+  }
+  for (const t of targets) t.efficiency = t.basePriority / (1 + t.estimatedCost);
+  targets.sort((a, b) => b.efficiency - a.efficiency);
+  const depth = Math.min(Brain.skill.routeDepth, targets.length);
+  const route = [], used = new Set();
+  let curX = startX, curY = startY;
+  for (let step = 0; step < depth; step++) {
+    let best = null, bestScore = -Infinity;
+    for (const t of targets) {
+      if (used.has(t)) continue;
+      const dist = costToReach(curX, curY, t.x, t.y);
+      const score = t.basePriority / (1 + dist);
+      if (score > bestScore) { bestScore = score; best = Object.assign({}, t, { dynamicCost: dist }); }
+    }
+    if (!best) break;
+    used.add(best);
+    route.push(best);
+    curX = best.x;
+    curY = best.y;
+  }
+  if (route.length === 0) route.push({ type: 'pass', x: startX + 200, y: startY, target: null, basePriority: 1, estimatedCost: 2 });
+  Brain.route.waypoints = route;
+  Brain.route.currentIndex = 0;
+  Brain.route.lastBuildX = player.x;
+}
+
+function getCurrentWaypoint() {
+  const r = Brain.route;
+  if (!r.waypoints.length) return null;
+  let safety = 0;
+  while (r.currentIndex < r.waypoints.length && safety++ < 50) {
+    const w = r.waypoints[r.currentIndex];
+    if (!w) { r.currentIndex++; continue; }
+    if (w.type === 'coin' && (!w.target || w.target.taken)) { r.currentIndex++; continue; }
+    if (w.type === 'kill' && (!w.target || !w.target.alive)) { r.currentIndex++; continue; }
+    if (w.type === 'drop' && !world.drops.includes(w.target)) { r.currentIndex++; continue; }
+    if (w.x < player.x - 50) { r.currentIndex++; continue; }
+    return w;
+  }
+  return null;
+}
+
+// ================================================================
+// ============ ИСПОЛНИТЕЛИ ======================================
+// ================================================================
+function doJump() {
+  if (player.onGround) { player.vy = JUMP_VEL; player.onGround = false; player.doubleJumpUsed = false; player.jumps++; AudioEngine.jump(); }
+}
+function doDoubleJump() {
+  if (!player.onGround && !player.doubleJumpUsed) { player.vy = JUMP_VEL * 0.85; player.doubleJumpUsed = true; AudioEngine.doubleJump(); }
+}
+function startAttack() { player.attacking = true; player.attackTimer = ATTACK_TIME; player.attackCooldown = ATTACK_CD; AudioEngine.sword(); }
+function shootAt(targetX, targetY) {
+  if (!hasInfiniteAmmo() && player.ammo < 1) return false;
+  if (player.shootCooldown > 0) return false;
+  if (world.bullets.length >= MAX_BULLETS) return false;
+  const px = player.x + player.w / 2, py = player.y + player.h * 0.4;
+  const dx = targetX - px, dy = targetY - py;
+  const spread = (1 - Brain.skill.shootIQ) * 0.25;
+  const angle = Math.atan2(dy, dx) + (Math.random() - 0.5) * spread;
+  world.bullets.push({
+    x: px, y: py, vx: Math.cos(angle) * BULLET_SPEED, vy: Math.sin(angle) * BULLET_SPEED,
+    life: BULLET_LIFE, r: 5, infinite: hasInfiniteAmmo()
+  });
+  if (!hasInfiniteAmmo()) player.ammo -= 1;
+  player.shootCooldown = SHOOT_CD;
+  spawnParticles(px, py, '#ffd93d', 5);
+  AudioEngine.shoot();
+  return true;
+}
+
+// Достаёт ли выстрел до цели. Пуля летит со скоростью BULLET_SPEED и падает
+// на 0.15 за кадр, живёт BULLET_LIFE и гаснет, уйдя за кадр. «Стрелять в ту
+// сторону» поэтому бессмысленно: считаем полёт и подбираем угол выше прямого
+// прицела, пока снаряд не пройдёт по врагу. Не подобрался — патрон не тратим,
+// в пустоту он не полетит.
+// Шагов ровно столько, сколько пуля живёт в игре: физика идёт шагами по
+// 1000/60 мс, и BULLET_LIFE гаснет по dt. Раньше делили на 16 (миллисекунды
+// вместо кадров) — примерка обещала выстрелу лишние 5 кадров полёта.
+const SHOT_STEPS = Math.ceil(BULLET_LIFE / (1000 / 60));
+const SHOT_TOLERANCE = 6;
+function aimShot(tx, ty, e) {
+  const px = player.x + player.w / 2, py = player.y + player.h * 0.4;
+  const base = Math.atan2(ty - py, tx - px);
+  for (let k = 0; k < 10; k++) {
+    const angle = base - k * 0.045;              // каждая проба выше предыдущей
+    const vx = Math.cos(angle) * BULLET_SPEED;
+    const vy0 = Math.sin(angle) * BULLET_SPEED;
+    let vy = vy0, x = px, y = py;
+    for (let i = 0; i < SHOT_STEPS; i++) {
+      x += vx; y += vy; vy += 0.15;
+      if (x > e.x - SHOT_TOLERANCE && x < e.x + e.w + SHOT_TOLERANCE &&
+          y > e.y - SHOT_TOLERANCE && y < e.y + e.h + SHOT_TOLERANCE) {
+        return { x: px + vx * 10, y: py + vy0 * 10 };
+      }
+      if (x < cameraX - 100 || x > cameraX + W + 100 || y > H + 100) break;
+    }
+  }
+  return null;
+}
+
+// ================================================================
+// ============ МЫШЛЕНИЕ =========================================
+// ================================================================
+function think() {
+  sense();
+  buildRoute();
+  updateSurvivalInstinct(16);
+  if (Math.abs(player.x - player.lastX) < 0.5) idleFrames++;
+  else idleFrames = 0;
+  const bestAction = planBestAction();
+  const waypoint = getCurrentWaypoint();
+  const hpRatio = player.hp / player.maxHp;
+  const nearEnemies = Brain.sense.enemies.filter(e => e.dist < 250);
+  let mode = 'patrol';
+  if (hpRatio < 0.3 && nearEnemies.length >= 2 && !hasInvulnBuff()) mode = 'flee';
+  else if (waypoint && waypoint.type === 'kill') mode = 'combat';
+  else if (waypoint && waypoint.type === 'coin') mode = 'collect';
+  else if (nearEnemies.length > 0) mode = 'combat';
+  Brain.plan.mode = mode;
+
+  if (bestAction) {
+    const a = bestAction.type;
+    Brain.plan.action = a;
+    Brain.plan.value = bestAction.value;
+    if (a === 'run') player.movementMode = 'forward';
+    else if (a === 'runBack') { player.movementMode = 'backward'; Brain.stats.dodges++; }
+    else if (a === 'wait') player.movementMode = 'hold';
+    else if (a === 'jump' || a === 'jump_double') {
+      player.movementMode = 'forward';
+      if (player.onGround && Brain.cooldowns.jump <= 0) {
+        doJump();
+        if (a === 'jump_double') player.doubleJumpPending = true;
+        Brain.cooldowns.jump = 200;
+      }
+    } else if (a === 'attack') {
+      player.movementMode = 'hold';
+      if (Brain.cooldowns.attack <= 0 && player.onGround) {
+        startAttack();
+        Brain.cooldowns.attack = Math.max(120, ATTACK_CD - Brain.skill.level * 20);
+        if (player.comboTimer > 0) { player.combo++; player.comboTimer = 900; }
+        else { player.combo = 1; player.comboTimer = 900; }
+        if (player.combo > Brain.stats.longestCombo) Brain.stats.longestCombo = player.combo;
+        AudioEngine.combo(player.combo);
+      }
+    }
+  }
+
+  if (idleFrames > 60) {
+    player.movementMode = 'forward';
+    if (player.onGround && Brain.cooldowns.jump <= 0) {
+      const nextGround = hasGroundAt(player.x + player.w + 5, player.y);
+      if (!nextGround) { doJump(); Brain.cooldowns.jump = 300; }
+    }
+    if (idleFrames === 61) { Brain.route.waypoints = []; Brain.route.currentIndex = 0; }
+  }
+
+  // Стреляем, только если снаряд правда дотягивается до врага: считаем полёт
+  // вместе с падением и подбираем угол. Не попасть — патрон не тратим.
+  if (Brain.sense.enemies.length > 0 && player.shootCooldown <= 0) {
+    if (hasInfiniteAmmo() || player.ammo > 0) {
+      const target = Brain.sense.enemies[0];
+      const e = target.e;
+      const worthIt = hasInfiniteAmmo() || e.type === 'flyer' || Brain.survival.fear > 0.12;
+      if (worthIt && target.dist > 70 && target.dist < SHOOT_RANGE) {
+        const flight = target.dist / BULLET_SPEED;
+        let aimX = e.x + e.w / 2, aimY = e.y + e.h / 2;
+        if (e.type === 'walker') aimX += (e.vx || 0) * flight * 0.9;
+        else if (e.type === 'flyer' && e.homing) {
+          const dxP = player.x - e.x, dyP = (player.y + 20) - e.y;
+          const len = Math.hypot(dxP, dyP) || 1;
+          aimX += (dxP / len) * 1.1 * TIME_K * flight;
+          aimY += (dyP / len) * 0.5 * TIME_K * flight;
+        }
+        const aim = aimShot(aimX, aimY, e);
+        if (aim) shootAt(aim.x, aim.y);
+      }
+    }
+  }
+}
+
+// ================================================================
+// ============ ОБУЧЕНИЕ =========================================
+// ================================================================
+const SKILL_NAMES = ['новичок','ученик','любитель','боец','опытный','ветеран','мастер','эксперт','гроссмейстер','легенда','БОГ'];
+
+function updateSkill() {
+  const e = Brain.experience;
+  const th = [4,10,20,34,52,74,100,132,170,214];
+  let lvl = 0;
+  for (let i = 0; i < th.length; i++) if (e >= th[i]) lvl = i + 1;
+  if (lvl !== Brain.skill.level) {
+    Brain.skill.level = lvl;
+    Brain.skill.name = SKILL_NAMES[lvl];
+    Brain.skill.reactionTime = Math.max(22, 110 - lvl * 10);
+    Brain.skill.lookahead = Math.min(7, 4 + Math.floor(lvl / 1.3));
+    Brain.skill.jumpAccuracy = Math.min(0.995, 0.86 + lvl * 0.016);
+    Brain.skill.combatIQ = Math.min(0.995, 0.6 + lvl * 0.045);
+    Brain.skill.perfectionism = Math.min(1.0, 0.6 + lvl * 0.045);
+    Brain.skill.shootIQ = Math.min(0.995, 0.5 + lvl * 0.055);
+    Brain.skill.routeDepth = Math.min(14, 8 + lvl);
+    Brain.skill.routeDistance = Math.min(1800, 1100 + lvl * 90);
+    Brain.skill.survivalIQ = Math.min(0.995, 0.55 + lvl * 0.05);
+    Brain.skill.dodgeIQ = Math.min(0.995, 0.55 + lvl * 0.05);
+    Brain.skill.predictionDepth = Math.min(55, 36 + lvl * 2);
+    Brain.skill.mathPrecision = Math.min(1.0, 0.65 + lvl * 0.04);
+  }
+}
+
+function rememberDeath(x, reason) {
+  const seg = Math.round(x / 100);
+  const key = seg + '|' + reason;
+  let mem = Brain.deathMemory[key];
+  if (!mem) mem = Brain.deathMemory[key] = { count: 0, severity: 0, seg, x };
+  const prev = mem.severity;
+  mem.count++;
+  mem.severity = Math.min(5, 1 + mem.count * 0.5);
+  // Растим сводку на дельту: первая смерть в отрезке даёт 1 (как раньше
+  // severity первой записи), каждая следующая — прибавку.
+  Brain.deathSeg[seg] = (Brain.deathSeg[seg] || 0) + (mem.severity - prev);
+}
+function learnFromDamage(enemy, dmg) {
+  Brain.experience += 1;
+  Brain.stats.totalDamageTaken += dmg || 0;
+  Brain.survival.damageEvents.push({ time: now(), damage: dmg || 10 });
+  if (enemy && Brain.enemyIntel[enemy.type]) Brain.enemyIntel[enemy.type].deaths++;
+  Brain.stats.perfectStreak = 0;
+  player.combo = 0;
+  AudioEngine.hurt();
+}
+function learnFromDeath(reason) {
+  Brain.experience += 2;
+  Brain.deaths++;
+  rememberDeath(player.x, reason);
+  Brain.stats.perfectStreak = 0;
+  player.combo = 0;
+  AudioEngine.death();
+}
+function learnFromKill(enemy, source) {
+  Brain.experience += 3;
+  Brain.totalKills++;
+  Brain.stats.enemiesKilledTotal++;
+  Brain.stats.perfectStreak++;
+  if (source === 'stomp') { Brain.stats.stompKills++; AudioEngine.stomp(); }
+  if (source === 'shoot') Brain.stats.shootKills++;
+  if (source === 'sword') Brain.stats.swordKills++;
+  if (Brain.enemyIntel[enemy.type]) Brain.enemyIntel[enemy.type].kills++;
+  AudioEngine.kill(enemy.type);
+  spawnDrop(enemy.x + enemy.w / 2, enemy.y + enemy.h / 2);
+}
+
+// ================================================================
+// ============ СТОЛКНОВЕНИЯ / РЕСПАВН ==========================
+// ================================================================
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+function playerRect() { return { x: player.x, y: player.y, w: player.w, h: player.h }; }
+function attackRect() {
+  const reach = 60;
+  return { x: player.facing > 0 ? player.x + player.w : player.x - reach, y: player.y + 10, w: reach, h: player.h - 20 };
+}
+
+function respawnAtBiomeStart(reason) {
+  const segIndex = Math.floor(player.x / SEGMENT);
+  let startSeg = segIndex - (segIndex % BIOME_LENGTH);
+  if (startSeg < 3) startSeg = 3;
+  const startX = startSeg * SEGMENT + 40;
+  player.x = startX;
+  player.y = GROUND_Y - player.h - 40;
+  player.vy = 0; player.vx = 0;
+  player.hp = player.maxHp;
+  player.invuln = 1500;
+  player.doubleJumpUsed = false;
+  player.doubleJumpPending = false;
+  player.attacking = false; player.attackTimer = 0; player.attackCooldown = 0;
+  player.combo = 0; player.comboTimer = 0;
+  player.stompCooldown = 0; player.shootCooldown = 0;
+  player.state = 'run';
+  player.holdTimer = 0;
+  player.retreatUntil = 0;
+  player.invulnBuffUntil = 0;
+  player.infiniteAmmoUntil = 0;
+  if (player.ammo > 5) player.ammo = 5;
+  Brain.survival.fear = 0;
+  Brain.survival.emergencyMode = false;
+  Brain.survival.damageEvents = [];
+  Brain.route.waypoints = [];
+  Brain.route.currentIndex = 0;
+  Brain.route.lastBuildX = 0;
+  world.bullets.length = 0;
+  world.drops.length = 0;
+  idleFrames = 0;
+  cameraX = player.x - 350;
+}
+
+// ================================================================
+// ============ ОБНОВЛЕНИЕ =======================================
+// ================================================================
+function update(dt) {
+  if (finished) return;
+  if (isNaN(dt) || dt <= 0) dt = 16;
+  for (const k in Brain.cooldowns) {
+    // think и buildRoute хранят не «заряд», а момент времени (now()), поэтому
+    // их нельзя вычитать: их сравнивают с текущим временем.
+    if (k === 'think' || k === 'buildRoute') continue;
+    if (Brain.cooldowns[k] > 0) Brain.cooldowns[k] -= dt;
+  }
+  if (player.comboTimer > 0) { player.comboTimer -= dt; if (player.comboTimer <= 0) player.combo = 0; }
+  if (player.stompCooldown > 0) player.stompCooldown -= dt;
+  if (player.shootCooldown > 0) player.shootCooldown -= dt;
+  // Второй прыжок делается в верхней точке, а не на следующем кадре: раньше
+  // добавка перебивала первый прыжок сразу после отрыва и «двойной» выходил
+  // НИЖЕ обычного, хотя примерка считала добавку в апексе и обещала выше.
+  if (player.doubleJumpPending && !player.onGround && !player.doubleJumpUsed && player.vy > 0) {
+    player.doubleJumpPending = false;
+    doDoubleJump();
+  }
+  think();
+
+  let moveVx = PLAYER_SPEED;
+  if (player.movementMode === 'backward') moveVx = -PLAYER_BACK_SPEED;
+  else if (player.movementMode === 'hold') moveVx = 0;
+  if (moveVx < 0 && player.x < 60) moveVx = 0;
+  player.vx = moveVx;
+  // Лицо по ходу движения. Раньше стояло жёстко 1, и левая ветка attackRect
+  // была мертва: в откате муха била мечом вперёд, мимо врага за спиной.
+  player.facing = moveVx < 0 ? -1 : 1;
+
+  const prevVy = player.vy, prevBottom = player.y + player.h;
+  player.vy += GRAVITY;
+  player.x += player.vx;
+  player.y += player.vy;
+  if (!isFinite(player.x)) player.x = 140;
+  if (!isFinite(player.y)) player.y = GROUND_Y - player.h;
+
+  player.onGround = false;
+  for (const p of world.platforms) {
+    if (player.x + player.w > p.x && player.x < p.x + p.w) {
+      const b = player.y + player.h;
+      if (player.vy >= 0 && prevBottom <= p.y + 3 && b >= p.y) {
+        player.y = p.y - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        player.doubleJumpUsed = false;
+        player.doubleJumpPending = false;
+      }
+    }
+  }
+
+  // Приподнятая земля — это ещё и стенка. Без этого герой входил в холм боком
+  // и шёл прямо сквозь него: судили только посадку сверху, а бокового упора не
+  // было. Из прыжка, которым он всё равно выйдет выше холма, не мешаем.
+  const apexFeet = player.y + player.h - (player.vy < 0 ? (player.vy * player.vy) / (2 * GRAVITY) : 0);
+  for (const p of world.platforms) {
+    if (!p.ground) continue;
+    if (player.y + player.h <= p.y + 2) continue;          // уже выше холма
+    if (player.x + player.w <= p.x || player.x >= p.x + p.w) continue;
+    if (player.vy < 0 && apexFeet <= p.y + 2) continue;    // перелетит
+    if (player.vx > 0) player.x = p.x - player.w;
+    else if (player.vx < 0) player.x = p.x + p.w;
+    break;
+  }
+
+  if (Math.abs(player.x - player.lastX) < 1 && player.onGround && player.movementMode === 'forward') {
+    player.stuckTimer++;
+    if (player.stuckTimer > 30) { doJump(); player.stuckTimer = 0; }
+  } else player.stuckTimer = 0;
+  player.lastX = player.x;
+
+  if (player.stompCooldown <= 0) {
+    for (const e of world.enemies) {
+      if (!e.alive) continue;
+      if (rectsOverlap(playerRect(), e)) {
+        const isFalling = prevVy > STOMP_MIN_VEL;
+        const comingFromAbove = prevBottom <= e.y + 20;
+        const notFlying = e.type !== 'flyer';
+        if (isFalling && comingFromAbove && notFlying) {
+          e.alive = false; player.kills++; learnFromKill(e, 'stomp');
+          spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#ffd93d', 25);
+          spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#ff8800', 15);
+          player.vy = JUMP_VEL * 0.75;
+          player.y = e.y - player.h - 2;
+          player.onGround = false; player.doubleJumpUsed = false;
+          player.stompCooldown = 200;
+          if (player.comboTimer > 0) { player.combo++; player.comboTimer = 900; }
+          else { player.combo = 1; player.comboTimer = 900; }
+          if (player.combo > Brain.stats.longestCombo) Brain.stats.longestCombo = player.combo;
+          AudioEngine.combo(player.combo);
+          break;
+        }
+      }
+    }
+  }
+
+  if (player.y > H + 300) { learnFromDeath('void'); respawnAtBiomeStart('void'); return; }
+  if (player.attackTimer > 0) { player.attackTimer -= dt; if (player.attackTimer <= 0) player.attacking = false; }
+  if (player.attackCooldown > 0) player.attackCooldown -= dt;
+  if (player.invuln > 0) {
+    player.invuln -= dt;
+    // 'hurt' ставилось на удар и не снималось: муха оставалась красной до конца
+    // эфира. Возвращаем обычный вид, как только кончилась неуязвимость.
+    if (player.invuln <= 0 && player.state === 'hurt') player.state = 'run';
+  }
+
+  if (player.attacking) {
+    const ar = attackRect();
+    for (const e of world.enemies) {
+      if (!e.alive) continue;
+      if (rectsOverlap(ar, e) && !e._hitThisSwing) {
+        e.hp--; e.hurtFlash = 150; e._hitThisSwing = true;
+        spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#ff4444', 12);
+        if (e.hp <= 0) {
+          e.alive = false; player.kills++; learnFromKill(e, 'sword');
+          spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#ffd93d', 22);
+        } else AudioEngine.hit();
+      }
+    }
+  } else {
+    for (const e of world.enemies) e._hitThisSwing = false;
+  }
+
+  for (let i = world.bullets.length - 1; i >= 0; i--) {
+    const b = world.bullets[i];
+    b.x += b.vx; b.y += b.vy; b.vy += 0.15; b.life -= dt;
+    let removed = false;
+    for (const e of world.enemies) {
+      if (!e.alive) continue;
+      if (b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h) {
+        e.hp -= BULLET_DAMAGE; e.hurtFlash = 150;
+        spawnParticles(b.x, b.y, '#ffaa00', 10);
+        if (e.hp <= 0) {
+          e.alive = false; player.kills++; learnFromKill(e, 'shoot');
+          spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#ffd93d', 22);
+        } else AudioEngine.hit();
+        removed = true; break;
+      }
+    }
+    if (!removed) {
+      // Пуля вязнет и в земле, и в холме: раньше она проходила сквозь них
+      // насквозь и уходила за кадр (треть выстрелов так и пропадала).
+      for (const p of world.platforms) {
+        if (b.x > p.x && b.x < p.x + p.w && b.y > p.y && b.y < p.y + p.h) {
+          spawnParticles(b.x, b.y, '#aaa', 6);
+          removed = true; break;
+        }
+      }
+    }
+    if (b.life <= 0 || b.y > H + 100 || b.x < cameraX - 100 || b.x > cameraX + W + 100) removed = true;
+    if (removed) world.bullets.splice(i, 1);
+  }
+
+  for (const e of world.enemies) {
+    if (!e.alive) continue;
+    if (Math.abs(e.x - player.x) > W) continue;
+    if (e.hurtFlash > 0) e.hurtFlash -= dt;
+    if (e.type === 'walker') {
+      e.x += e.vx;
+      if (e.x < e.patrolMin || e.x > e.patrolMax) e.vx *= -1;
+      const ePrev = e.y + e.h;
+      e.vy += GRAVITY; e.y += e.vy;
+      for (const p of world.platforms) {
+        if (e.x + e.w > p.x && e.x < p.x + p.w) {
+          const b = e.y + e.h;
+          if (e.vy >= 0 && ePrev <= p.y + 3 && b >= p.y) { e.y = p.y - e.h; e.vy = 0; }
+        }
+      }
+      // Холм для него тоже стенка: иначе враг патрулирует прямо внутри земли.
+      if (e.vy >= 0) {
+        for (const p of world.platforms) {
+          if (!p.ground) continue;
+          if (e.y + e.h <= p.y + 2) continue;
+          if (e.x + e.w <= p.x || e.x >= p.x + p.w) continue;
+          if (e.vx > 0) e.x = p.x - e.w; else e.x = p.x + p.w;
+          e.vx *= -1;                                        // упёрся — разворот
+          break;
+        }
+      }
+      e.jumpTimer -= dt;
+      if (e.jumpTimer <= 0 && e.vy === 0) { e.vy = -12 * TIME_K; e.jumpTimer = 1500 + Math.random() * 2000; }
+      e.anim += 0.2;
+    } else if (e.type === 'slime') {
+      e.anim += 0.15;
+      e.vy += GRAVITY; e.y += e.vy;
+      // Прыгает он не от низа кадра, а от земли под собой: на холме она выше,
+      // иначе слайм уходит в холм по пояс.
+      const floor = floorYAt(e.x, e.y + e.h);
+      if (e.y + e.h >= floor) { e.y = floor - e.h; e.vy = (-9 - Math.random() * 3) * TIME_K; }
+      if (Math.abs(e.x - player.x) < 350) {
+        const step = Math.sign(player.x - e.x) * 0.7 * TIME_K;
+        let moved = e.x + step;
+        for (const p of world.platforms) {
+          if (!p.ground) continue;
+          if (e.y + e.h <= p.y + 2) continue;
+          if (moved + e.w <= p.x || moved >= p.x + p.w) continue;
+          moved = step > 0 ? p.x - e.w : p.x + p.w;         // упёрся в холм
+          break;
+        }
+        e.x = moved;
+      }
+    } else {
+      e.flyPhase += 0.05 * TIME_K;
+      e.y = e.baseY + Math.sin(e.flyPhase) * e.flyAmp;
+      if (e.homing && Math.abs(e.x - player.x) < 400) {
+        const dx = player.x - e.x, dy = (player.y + 20) - e.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        e.x += (dx / len) * 1.1 * TIME_K; e.y += (dy / len) * 0.5 * TIME_K;
+      } else e.x += Math.sin(e.anim * 0.5) * 0.5 * TIME_K;
+      e.anim += 0.15;
+    }
+    if (!isFinite(e.x)) e.x = player.x + 200;
+    if (!isFinite(e.y)) e.y = GROUND_Y - e.h;
+    const invulnActive = hasInvulnBuff() || player.invuln > 0;
+    if (!invulnActive && player.stompCooldown <= 0 && rectsOverlap(playerRect(), e)) {
+      const dmg = e.type === 'walker' ? 12 : e.type === 'slime' ? 8 : 10;
+      player.hp -= dmg;
+      player.invuln = 800; player.vy = -8; player.state = 'hurt';
+      learnFromDamage(e, dmg);
+      spawnParticles(player.x + player.w / 2, player.y + player.h / 2, '#ff0000', 15);
+      if (player.hp <= 0) { player.hp = 0; learnFromDeath('enemy_' + e.type); respawnAtBiomeStart('enemy'); return; }
+    }
+  }
+
+  for (const h of world.hazards) {
+    h.anim += 0.1;
+    const invulnActive = hasInvulnBuff() || player.invuln > 0;
+    if (!invulnActive && rectsOverlap(playerRect(), h)) {
+      const dmg = 18;
+      player.hp -= dmg; player.invuln = 1200; player.vy = -12;
+      learnFromDamage(null, dmg);
+      spawnParticles(player.x + player.w / 2, player.y + player.h / 2, '#ff4400', 20);
+      if (player.hp <= 0) { player.hp = 0; learnFromDeath('hazard_' + h.type); respawnAtBiomeStart('hazard'); return; }
+    }
+  }
+
+  for (let i = world.drops.length - 1; i >= 0; i--) {
+    const d = world.drops[i];
+    d.anim += 0.1;
+    d.life -= dt;
+    d.x += d.vx;
+    d.vy += GRAVITY * 0.5;
+    d.y += d.vy;
+    // Бонус падает на землю под собой: на холме она выше, иначе он уходит в холм.
+    const floor = floorYAt(d.x, d.y + 6);
+    if (d.y > floor - 20) { d.y = floor - 20; d.vy = 0; d.vx *= 0.9; }
+    const dx = (player.x + player.w / 2) - d.x, dy = (player.y + player.h / 2) - d.y;
+    if (dx * dx + dy * dy < 50 * 50) { applyDrop(d); world.drops.splice(i, 1); continue; }
+    if (d.life <= 0) world.drops.splice(i, 1);
+  }
+
+  for (const c of world.coins) {
+    if (c.taken) continue;
+    c.anim += 0.1;
+    const dx = (player.x + player.w / 2) - c.x, dy = (player.y + player.h / 2) - c.y;
+    if (dx * dx + dy * dy < 45 * 45) {
+      c.taken = true;
+      player.coinsCollected++;
+      if (!hasInfiniteAmmo()) player.ammo++;
+      Brain.stats.coinsTotal++;
+      spawnParticles(c.x, c.y, '#ffd93d', 10);
+      spawnParticles(c.x, c.y, '#ffaa00', 5);
+      AudioEngine.coin();
+    }
+  }
+
+  blimp.drift += 0.002;
+  blimp.x += Math.sin(blimp.drift) * 0.05;
+
+  if (world.particles.length > MAX_PARTICLES) world.particles.splice(0, world.particles.length - MAX_PARTICLES);
+  for (let i = world.particles.length - 1; i >= 0; i--) {
+    const p = world.particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.3; p.life -= dt;
+    if (p.life <= 0) world.particles.splice(i, 1);
+  }
+
+  cameraX = player.x - 350;
+  ensureGenerated(player.x + W + 800);
+  pruneWorld();
+  currentBiome = getBiomeForIndex(Math.floor(player.x / SEGMENT));
+  AudioEngine.onBiomeChanged();
+  updateSkill();
+
+  distance = Math.max(0, Math.floor((player.x - 140) / 10));
+  const elapsed = (performance.now() - startTime) / 1000;
+  const m = Math.floor(elapsed / 60);
+  const s = Math.floor(elapsed % 60);
+  // Раньше это уходило в разметку. Теперь копится здесь, а drawHud кладёт
+  // готовые строки на холст: в эфире разметки нет, есть только кадр.
+  hud.hp = Math.max(0, Math.floor(player.hp));
+  hud.dist = distance;
+  hud.kills = player.kills;
+  hud.ammo = hasInfiniteAmmo() ? '∞' : String(player.ammo);
+  hud.deaths = Brain.deaths;
+  hud.combo = player.combo;
+  hud.time = m + ':' + String(s).padStart(2, '0');
+
+  hud.buffs.length = 0;
+  if (hasInvulnBuff()) {
+    const left = Math.ceil((player.invulnBuffUntil - now()) / 1000);
+    hud.buffs.push({ text: '● НЕУЯЗВИМОСТЬ ' + left + 'с', color: '#4fc3f7' });
+  }
+  if (hasInfiniteAmmo()) {
+    const left = Math.ceil((player.infiniteAmmoUntil - now()) / 1000);
+    hud.buffs.push({ text: '∞ БЕСКОНЕЧНЫЕ ПАТРОНЫ ' + left + 'с', color: '#ffd93d' });
+  }
+
+  hud.progress = Math.min(100, (elapsed / TOTAL_SECONDS) * 100);
+  if (elapsed >= TOTAL_SECONDS) finished = true;
+}
+
+function spawnParticles(x, y, color, count) {
+  if (!isFinite(x) || !isFinite(y)) return;
+  if (world.particles.length > MAX_PARTICLES) return;
+  for (let i = 0; i < count; i++) {
+    world.particles.push({
+      x, y, vx: (Math.random() - 0.5) * 5, vy: -Math.random() * 4 - 1,
+      life: 400 + Math.random() * 300, maxLife: 700, color, size: 3 + Math.random() * 4
+    });
+  }
+}
+
+// ================================================================
+// ============ ОТРИСОВКА ========================================
+// ================================================================
+// Небо и светило — статика кадра, но заливка во весь экран Skia считает по
+// пикселю: замер показал 4.7 мс на небо и ещё 1.8 на солнце из 25 мс кадра.
+// Поэтому они пекутся в слой один раз на биом, а в кадре остаётся одна накладка.
+let backdrop = null, backdropCtx = null, backdropBiome = -1;
+function backdropLayer() {
+  if (backdrop && backdropBiome === currentBiome) return backdrop;
+  if (!backdrop) {
+    backdrop = document.createElement('canvas');
+    backdrop.width = W; backdrop.height = H;
+    backdropCtx = backdrop.getContext('2d');
+  }
+  const g = backdropCtx;
+  const biome = BIOMES[currentBiome];
+  const sky = biome.sky;
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, sky[0]); grad.addColorStop(0.35, sky[1]);
+  grad.addColorStop(0.65, sky[2]); grad.addColorStop(1, sky[3]);
+  g.fillStyle = grad; g.fillRect(0, 0, W, H);
+  if (biome.name === 'НОЧЬ') drawMoon(W - 180, 140, g);
+  else drawSun(W - 180, 140, g);
+  backdropBiome = currentBiome;
+  return backdrop;
+}
+
+// Горы: гряда залитых треугольников — 3.1 мс кадра, потому что каждая заливка
+// стоит одинаково независимо от площади. Они не меняются, кроме цвета биома, и
+// единственное, что в них движется, — сдвиг от камеры. Поэтому печём полосу и
+// кладём её двумя накладками.
+//
+// Шаг гребня (125 px) делит ширину полосы без остатка — иначе на стыке двух
+// накладок узор сбивался бы и в гряде появлялся шов. Сама полоса не короче
+// кадра с запасом на заворот: тогда две накладки заведомо закрывают экран.
+// Шаг мелкий нарочно: в исходной гряде было два десятка зубцов на две тысячи
+// пикселей, то есть один зубец на сотню — гребень выходил плотный, почти
+// сплошной, а с шагом в полкилометра между пиками светило небо.
+const MOUNTAIN_STEP = 125;
+const MOUNTAIN_W = 480;
+function mountainColor(biome) {
+  return biome.name === 'ВУЛКАН' ? '#4a1a1a' : biome.name === 'НОЧЬ' ? '#1a1a3a' :
+         biome.name === 'ПУСТЫНЯ' ? '#a87a4a' : biome.name === 'ЛЬДЫ' ? '#7a9ab8' : '#5a7a9e';
+}
+let mountainStrip = null, mountainStripBiome = -1;
+function mountainLayer() {
+  const P = Math.ceil((W + 1000) / MOUNTAIN_STEP) * MOUNTAIN_STEP;
+  if (!mountainStrip) {
+    mountainStrip = document.createElement('canvas');
+    mountainStrip.height = 340;
+  }
+  if (mountainStrip.width !== P) mountainStrip.width = P;
+  if (mountainStripBiome === currentBiome) return mountainStrip;
+  const g = mountainStrip.getContext('2d');
+  g.clearRect(0, 0, P, 340);
+  g.fillStyle = mountainColor(BIOMES[currentBiome]);
+  // Высоту вершины берём от номера зубца внутри полосы, а не от Math.random:
+  // узор обязан повторяться ровно через полосу, иначе на стыке накладок
+  // вырастает зуб другой высоты и по гряде идёт шов. Зубцы у краёв полосы
+  // рисуем ещё раз — их половинки лежат по обе стороны стыка.
+  const cells = P / MOUNTAIN_STEP;
+  for (let k = -3; k <= cells; k++) {
+    const x = k * MOUNTAIN_STEP;
+    const idx = ((k % cells) + cells) % cells;
+    const r = Math.abs(Math.sin(idx * 12.9898) * 43758.5453) % 1;
+    g.beginPath();
+    g.moveTo(x, 330);
+    g.lineTo(x + MOUNTAIN_W / 2, 330 - (110 + 200 * r));
+    g.lineTo(x + MOUNTAIN_W, 330);
+    g.fill();
+  }
+  mountainStripBiome = currentBiome;
+  return mountainStrip;
+}
+
+// Виньетка. Раньше это была заливка во весь кадр градиентом, потом целая
+// накладка-слой — и то и другое стоит одинаково дорого, потому что Skia платит
+// за каждый пиксель кадра (замер: 3.9 мс). Затемняем только края четырьмя
+// полосами: середина кадра остаётся нетронутой, а видно ровно то же самое.
+function drawVignette(g) {
+  const bands = [
+    [0, 0, W, H * 0.16, 0, 0, 0, H * 0.16],          // сверху
+    [0, H * 0.84, W, H * 0.16, 0, H, 0, H * 0.84],   // снизу
+    [0, 0, W * 0.09, H, 0, 0, W * 0.09, 0],          // слева
+    [W * 0.91, 0, W * 0.09, H, W, 0, W * 0.91, 0],   // справа
+  ];
+  for (const [x, y, w, h, gx0, gy0, gx1, gy1] of bands) {
+    const grad = g.createLinearGradient(gx0, gy0, gx1, gy1);
+    grad.addColorStop(0, 'rgba(0,0,0,0.34)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(x, y, w, h);
+  }
+}
+
+// Плитки земли и дерева: их рисовали градиентами на каждый отрезок кадра,
+// а отрезок на экране не один — дешевле испечь плитку и класть её накладкой.
+const groundTiles = {};
+function groundTile(biomeIdx) {
+  if (groundTiles[biomeIdx]) return groundTiles[biomeIdx];
+  const pb = BIOMES[biomeIdx] || BIOMES[0];
+  const cv = document.createElement('canvas');
+  cv.width = SEGMENT; cv.height = 200;
+  const g = cv.getContext('2d');
+  const dirt = g.createLinearGradient(0, 0, 0, 120);
+  dirt.addColorStop(0, pb.dirt); dirt.addColorStop(1, '#1a1008');
+  g.fillStyle = dirt; g.fillRect(0, 0, SEGMENT, 200);
+  const grass = g.createLinearGradient(0, 0, 0, 22);
+  grass.addColorStop(0, pb.ground); grass.addColorStop(1, pb.grass);
+  g.fillStyle = grass; g.fillRect(0, 0, SEGMENT, 22);
+  g.fillStyle = 'rgba(255,255,255,0.22)'; g.fillRect(0, 0, SEGMENT, 5);
+  groundTiles[biomeIdx] = cv;
+  return cv;
+}
+
+let woodTile = null;
+function woodTileLayer() {
+  if (woodTile) return woodTile;
+  const cv = document.createElement('canvas');
+  cv.width = 200; cv.height = 24;
+  const g = cv.getContext('2d');
+  const wood = g.createLinearGradient(0, 0, 0, 24);
+  wood.addColorStop(0, '#a0703d'); wood.addColorStop(0.5, '#8B5A2B'); wood.addColorStop(1, '#5a3818');
+  g.fillStyle = wood; g.fillRect(0, 0, 200, 24);
+  g.fillStyle = 'rgba(255,220,150,0.5)'; g.fillRect(0, 0, 200, 3);
+  woodTile = cv;
+  return cv;
+}
+
+function draw() {
+  ctx.drawImage(backdropLayer(), 0, 0);
+  drawBlimp();
+
+  // Гряда идёт медленнее мира и заворачивается по кольцу шириной в полосу.
+  // Вторая накладка нужна только когда первая не достаёт до правого края: её
+  // левый край — ровно правый край первой. Половину кадров вторая целиком за
+  // экраном, и тогда мы её не кладём (замер: одна накладка гряды 1.1 мс).
+  const mtn = mountainLayer();
+  const mtnP = mtn.width;
+  const mtnShift = (((cameraX * 0.15) % mtnP) + mtnP) % mtnP;
+  const mtnX = -mtnShift - 500;
+  ctx.drawImage(mtn, mtnX, GROUND_Y - 230);
+  if (mtnX + mtnP < W) ctx.drawImage(mtn, mtnX + mtnP, GROUND_Y - 230);
+
+  ctx.save();
+  ctx.translate(-cameraX, 0);
+  for (const key in Brain.deathMemory) {
+    const mem = Brain.deathMemory[key];
+    const memX = mem.seg * 100;
+    if (memX < cameraX - 250 || memX > cameraX + W + 250) continue;
+    const alpha = Math.min(0.3, mem.severity * 0.08);
+    ctx.fillStyle = 'rgba(255,0,0,' + alpha + ')';
+    ctx.beginPath(); ctx.arc(memX, GROUND_Y - 30, 70, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const p of world.platforms) {
+    if (p.x + p.w < cameraX - 150 || p.x > cameraX + W + 150) continue;
+    if (p.ground) {
+      // Земля — две заливки с градиентами на каждый отрезок (замер: 2 мс кадра).
+      // Печём плитку на биом: отрезков на экране несколько, и все одного размера.
+      // Ширину берём у платформы, а не у плитки: у холма она втрое уже, и раньше
+      // плитка уезжала на 209 px правее — трава рисовалась там, где коллизии нет.
+      ctx.drawImage(groundTile(p.biome !== undefined ? p.biome : 0), p.x, p.y, p.w, 200);
+    } else {
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(p.x + 3, p.y + p.h - 3, p.w, 5);
+      ctx.drawImage(woodTileLayer(), p.x, p.y, p.w, p.h);
+    }
+  }
+  // Декор кладём поверх земли, а не под неё: раньше тень и низ ствола срезало
+  // полотном земли, и деревья стояли «по колено» в грунте.
+  for (const d of world.decorations) {
+    if (d.x < cameraX - 250 || d.x > cameraX + W + 250) continue;
+    drawDecoration(d);
+  }
+  for (const h of world.hazards) {
+    if (h.x + h.w < cameraX - 100 || h.x > cameraX + W + 100) continue;
+    if (h.type === 'lava') {
+      const lg = ctx.createLinearGradient(0, h.y, 0, h.y + h.h);
+      lg.addColorStop(0, '#ff8a2a'); lg.addColorStop(0.5, '#ff4400'); lg.addColorStop(1, '#8a1a00');
+      ctx.fillStyle = lg;
+      ctx.beginPath();
+      const wobble = Math.sin(h.anim) * 2;
+      ctx.moveTo(h.x, h.y + h.h);
+      for (let i = 0; i <= h.w; i += 6) ctx.lineTo(h.x + i, h.y + wobble * Math.sin(i * 0.1 + h.anim));
+      ctx.lineTo(h.x + h.w, h.y + h.h); ctx.closePath(); ctx.fill();
+      ctx.shadowColor = '#ff4400'; ctx.shadowBlur = 20;
+      ctx.fillStyle = 'rgba(255,100,0,0.3)'; ctx.fillRect(h.x, h.y, h.w, h.h);
+      ctx.shadowBlur = 0;
+    } else if (h.type === 'sand') {
+      // Песчаная яма пустыни. Раньше падала в ветку лавы и красилась огнём:
+      // в пустыне из земли били оранжевые сполохи.
+      const sg = ctx.createLinearGradient(0, h.y, 0, h.y + h.h);
+      sg.addColorStop(0, '#f0d79a'); sg.addColorStop(0.5, '#c9a468'); sg.addColorStop(1, '#7a5a30');
+      ctx.fillStyle = sg;
+      ctx.beginPath();
+      const wobble = Math.sin(h.anim) * 2;
+      ctx.moveTo(h.x, h.y + h.h);
+      for (let i = 0; i <= h.w; i += 6) ctx.lineTo(h.x + i, h.y + wobble * Math.sin(i * 0.1 + h.anim));
+      ctx.lineTo(h.x + h.w, h.y + h.h); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(255,240,200,0.35)'; ctx.fillRect(h.x, h.y, h.w, h.h);
+    } else if (h.type === 'ice') {
+      ctx.fillStyle = '#a8e0f8';
+      ctx.beginPath();
+      for (let i = 0; i < h.w; i += 10) {
+        ctx.moveTo(h.x + i, h.y + h.h); ctx.lineTo(h.x + i + 5, h.y); ctx.lineTo(h.x + i + 10, h.y + h.h);
+      }
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#888';
+      ctx.beginPath();
+      const cnt = 4, sw = h.w / cnt;
+      for (let i = 0; i < cnt; i++) {
+        ctx.moveTo(h.x + i * sw, h.y + h.h); ctx.lineTo(h.x + i * sw + sw / 2, h.y); ctx.lineTo(h.x + (i + 1) * sw, h.y + h.h);
+      }
+      ctx.fill();
+    }
+  }
+  for (const c of world.coins) {
+    if (c.taken) continue;
+    if (c.x < cameraX - 60 || c.x > cameraX + W + 60) continue;
+    const bob = Math.sin(c.anim) * 5;
+    const cx = c.x, cy = c.y + bob;
+    const gg = ctx.createRadialGradient(cx, cy, 2, cx, cy, 25);
+    gg.addColorStop(0, 'rgba(255,220,80,0.7)'); gg.addColorStop(1, 'rgba(255,220,80,0)');
+    ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(cx, cy, 25, 0, Math.PI * 2); ctx.fill();
+    const cg = ctx.createRadialGradient(cx - 3, cy - 3, 2, cx, cy, c.r);
+    cg.addColorStop(0, '#fff8b0'); cg.addColorStop(0.5, '#ffd93d'); cg.addColorStop(1, '#c88a00');
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(cx, cy, c.r, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const d of world.drops) {
+    if (d.x < cameraX - 60 || d.x > cameraX + W + 60) continue;
+    drawDrop(d);
+  }
+  for (const e of world.enemies) {
+    if (!e.alive) continue;
+    if (e.x + e.w < cameraX - 150 || e.x > cameraX + W + 150) continue;
+    if (e.hurtFlash > 0 && Math.floor(e.hurtFlash / 50) % 2 === 0) continue;
+    drawEnemy(e);
+  }
+  for (const b of world.bullets) {
+    const glow = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, 14);
+    if (b.infinite) {
+      glow.addColorStop(0, 'rgba(255,255,200,1)'); glow.addColorStop(0.4, 'rgba(255,240,100,0.9)'); glow.addColorStop(1, 'rgba(255,200,0,0)');
+    } else {
+      glow.addColorStop(0, 'rgba(255,240,150,1)'); glow.addColorStop(0.4, 'rgba(255,200,50,0.9)'); glow.addColorStop(1, 'rgba(255,150,0,0)');
+    }
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(b.x, b.y, 14, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fffbe0'; ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = b.infinite ? 'rgba(255,240,100,0.7)' : 'rgba(255,200,50,0.5)';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx * 0.8, b.y - b.vy * 0.8); ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of world.particles) {
+    const a = p.life / p.maxLife;
+    ctx.globalAlpha = Math.max(0, a) * 0.9;
+    const gg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size * 2);
+    gg.addColorStop(0, p.color); gg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  drawPlayer();
+  ctx.restore();
+
+  drawVignette(ctx);
+
+  if (finished) {
+    ctx.fillStyle = 'rgba(0,0,0,0.9)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#ffd93d'; ctx.font = 'bold 60px monospace'; ctx.textAlign = 'center';
+    ctx.shadowColor = '#ff9a00'; ctx.shadowBlur = 25;
+    ctx.fillText('ПРОХОЖДЕНИЕ ЗАВЕРШЕНО!', W / 2, H / 2 - 70);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff'; ctx.font = '24px monospace';
+    ctx.fillText('5 часов непрерывной игры пройдено', W / 2, H / 2 + 10);
+    ctx.fillText('Финальный навык: ' + Brain.skill.name + ' (' + Brain.skill.level + ')', W / 2, H / 2 + 50);
+    ctx.fillText('Убито: ' + player.kills + ' | Смертей: ' + Brain.deaths + ' | Комбо: x' + Brain.stats.longestCombo, W / 2, H / 2 + 90);
+  }
+}
+
+function drawBlimp() {
+  const px = W * blimp.offsetX + blimp.x - cameraX * 0.05;
+  const wrapX = ((px % (W * 1.5)) + W * 1.5) % (W * 1.5) - W * 0.25;
+  const py = H * blimp.offsetY + Math.sin(blimp.drift) * 3;
+  ctx.save();
+  ctx.translate(wrapX, py);
+  ctx.scale(blimp.scale, blimp.scale);
+  ctx.rotate(Math.sin(blimp.drift * 0.7) * 0.03);
+  // Тень раньше рисовалась внутри scale()/rotate() корпуса и уезжала посреди
+  // неба, да и вовсе была невидима: земля кладётся позже и накрывает её.
+  const bodyGrad = ctx.createLinearGradient(0, -35, 0, 35);
+  bodyGrad.addColorStop(0, '#e8e0d0'); bodyGrad.addColorStop(0.3, '#d8d0c0');
+  bodyGrad.addColorStop(0.7, '#c8b8a0'); bodyGrad.addColorStop(1, '#a89a80');
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath(); ctx.ellipse(0, 0, 80, 32, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(80,60,40,0.5)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(0, 0, 80, 32, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(180,60,40,0.7)'; ctx.fillRect(-70, -6, 140, 4);
+  ctx.fillStyle = 'rgba(80,60,40,0.4)'; ctx.fillRect(-70, 6, 140, 2);
+  // Название канала на борту — дирижабль и есть вывеска эфира.
+  ctx.font = 'bold 15px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(110,35,25,0.9)';
+  ctx.fillText('ONE1GAME', 0, -15);
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#c8b8a0';
+  ctx.beginPath(); ctx.ellipse(75, 0, 15, 22, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#b8a890';
+  ctx.beginPath();
+  ctx.moveTo(-72, 0); ctx.lineTo(-95, -20); ctx.lineTo(-85, 0); ctx.lineTo(-95, 20); ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(80,60,40,0.5)'; ctx.stroke();
+  ctx.fillStyle = '#6a5a48'; ctx.fillRect(-20, 30, 40, 12);
+  ctx.fillStyle = '#4a3a28'; ctx.fillRect(-22, 28, 44, 4);
+  ctx.fillStyle = '#ffd93d';
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath(); ctx.arc(-12 + i * 12, 36, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowColor = '#ffd93d'; ctx.shadowBlur = 6; ctx.fill(); ctx.shadowBlur = 0;
+  }
+  ctx.strokeStyle = 'rgba(60,40,20,0.7)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-15, 28); ctx.lineTo(-25, 20);
+  ctx.moveTo(15, 28); ctx.lineTo(25, 20);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawDrop(d) {
+  const bob = Math.sin(d.anim * 2) * 4;
+  const cx = d.x, cy = d.y + bob;
+  const glowColor = d.type === 'invuln' ? '#4fc3f7' : '#ffd93d';
+  const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 35);
+  glow.addColorStop(0, glowColor + 'cc');
+  glow.addColorStop(0.5, glowColor + '55');
+  glow.addColorStop(1, glowColor + '00');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, 35, 0, Math.PI * 2); ctx.fill();
+  const pulse = 1 + Math.sin(d.anim * 4) * 0.1;
+  const r = d.r * pulse;
+  ctx.fillStyle = d.type === 'invuln' ? '#2196f3' : '#ffb300';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = d.type === 'invuln' ? '#4fc3f7' : '#ffd93d';
+  ctx.beginPath(); ctx.arc(cx, cy, r * 0.75, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.floor(r * 1.3) + 'px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(d.type === 'invuln' ? '◆' : '∞', cx, cy + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawSun(x, y, g = ctx) {
+  g.save(); g.translate(x, y);
+  for (let i = 0; i < 12; i++) {
+    g.rotate(Math.PI * 2 / 12);
+    const ray = g.createLinearGradient(0, 0, 0, 200);
+    ray.addColorStop(0, 'rgba(255,244,150,0.35)'); ray.addColorStop(1, 'rgba(255,244,150,0)');
+    g.fillStyle = ray;
+    g.beginPath(); g.moveTo(-10, 0); g.lineTo(0, 200); g.lineTo(10, 0); g.fill();
+  }
+  g.restore();
+  const glow = g.createRadialGradient(x, y, 10, x, y, 90);
+  glow.addColorStop(0, '#fffbe0'); glow.addColorStop(0.4, '#fff4b0'); glow.addColorStop(1, 'rgba(255,244,176,0)');
+  g.fillStyle = glow; g.beginPath(); g.arc(x, y, 90, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#ffffff'; g.beginPath(); g.arc(x, y, 45, 0, Math.PI * 2); g.fill();
+}
+function drawMoon(x, y, g = ctx) {
+  const glow = g.createRadialGradient(x, y, 10, x, y, 100);
+  glow.addColorStop(0, '#ffffe0'); glow.addColorStop(0.5, '#e8e8c0'); glow.addColorStop(1, 'rgba(200,200,180,0)');
+  g.fillStyle = glow; g.beginPath(); g.arc(x, y, 100, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#ffffe0'; g.beginPath(); g.arc(x, y, 50, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'rgba(180,180,150,0.4)';
+  g.beginPath(); g.arc(x - 15, y - 10, 8, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(x + 12, y + 8, 6, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(x + 5, y - 20, 4, 0, Math.PI * 2); g.fill();
+}
+function drawDecoration(d) {
+  if (d.type === 'tree') {
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(d.x, d.y + 5, 50 * d.scale, 8 * d.scale, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#5a3818'; ctx.fillRect(d.x - 6, d.y - 80 * d.scale, 12, 80 * d.scale);
+    for (let l = 0; l < 3; l++) {
+      const ly = d.y - (100 + l * 25) * d.scale, ls = (45 - l * 8) * d.scale;
+      ctx.fillStyle = l === 0 ? '#2d6b2d' : l === 1 ? '#3d8b3d' : '#4a9a4a';
+      ctx.beginPath(); ctx.arc(d.x, ly, ls, 0, Math.PI * 2); ctx.fill();
+    }
+  } else if (d.type === 'cactus') {
+    ctx.fillStyle = '#3d8b3d';
+    ctx.fillRect(d.x - 8, d.y - 70 * d.scale, 16, 70 * d.scale);
+    ctx.fillRect(d.x - 25, d.y - 50 * d.scale, 17, 12);
+    ctx.fillRect(d.x - 25, d.y - 50 * d.scale, 10, 30);
+    ctx.fillRect(d.x + 8, d.y - 40 * d.scale, 17, 12);
+    ctx.fillRect(d.x + 15, d.y - 40 * d.scale, 10, 25);
+  } else if (d.type === 'ice') {
+    ctx.fillStyle = 'rgba(200,240,255,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(d.x - 20, d.y); ctx.lineTo(d.x - 5, d.y - 60 * d.scale);
+    ctx.lineTo(d.x + 5, d.y - 40 * d.scale); ctx.lineTo(d.x + 15, d.y - 70 * d.scale);
+    ctx.lineTo(d.x + 22, d.y); ctx.closePath(); ctx.fill();
+  } else if (d.type === 'rock') {
+    ctx.fillStyle = '#3a2a1a';
+    ctx.beginPath(); ctx.arc(d.x, d.y - 15 * d.scale, 20 * d.scale, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = 'rgba(255,120,0,0.4)';
+    ctx.beginPath(); ctx.arc(d.x, d.y - 15 * d.scale, 15 * d.scale, Math.PI, 0); ctx.fill();
+  } else {
+    const g = ctx.createRadialGradient(d.x, d.y - 15, 5, d.x, d.y - 15, 30 * d.scale);
+    g.addColorStop(0, '#5aa85a'); g.addColorStop(1, '#2a5a2a');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(d.x, d.y - 12, 26 * d.scale, Math.PI, 0); ctx.fill();
+  }
+}
+function drawEnemy(e) {
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(e.x + e.w / 2, e.y + e.h + 3, e.w / 2, 5, 0, 0, Math.PI * 2); ctx.fill();
+  if (e.type === 'walker') {
+    const g = ctx.createLinearGradient(e.x, e.y, e.x, e.y + e.h);
+    g.addColorStop(0, '#a04040'); g.addColorStop(1, '#5a1a1a');
+    ctx.fillStyle = g; ctx.fillRect(e.x, e.y + 18, e.w, 32);
+    const hg = ctx.createRadialGradient(e.x + e.w / 2 - 4, e.y + 8, 3, e.x + e.w / 2, e.y + 11, e.w);
+    hg.addColorStop(0, '#c05050'); hg.addColorStop(1, '#7a2d2d');
+    ctx.fillStyle = hg; ctx.fillRect(e.x + 4, e.y, e.w - 8, 22);
+    const dir = player.x < e.x ? -1 : 1;
+    ctx.fillStyle = '#ff0'; ctx.shadowColor = '#ff0'; ctx.shadowBlur = 8;
+    ctx.fillRect(e.x + 8 + (dir > 0 ? 12 : 0), e.y + 7, 5, 5);
+    ctx.fillRect(e.x + 20 + (dir > 0 ? 12 : 0), e.y + 7, 5, 5);
+    ctx.shadowBlur = 0;
+    // Ноги ходят вверх от земли. Раньше Math.max(0, ...) опускал левую ногу на
+    // 5 px НИЖЕ хитбокса — в кадре ступня уходила под землю, будто он тонет.
+    const lp = Math.sin(e.anim) * 4;
+    ctx.fillStyle = '#3a1010';
+    ctx.fillRect(e.x + 5, e.y + e.h - 8 - Math.max(0, lp), 8, 8);
+    ctx.fillRect(e.x + e.w - 13, e.y + e.h - 8 - Math.max(0, -lp), 8, 8);
+  } else if (e.type === 'slime') {
+    const sq = Math.sin(e.anim * 2) * 4;
+    const g = ctx.createRadialGradient(e.x + e.w / 2 - 8, e.y + e.h / 2 - 6, 3, e.x + e.w / 2, e.y + e.h / 2, e.w);
+    g.addColorStop(0, '#7ad48a'); g.addColorStop(0.6, '#3daa5a'); g.addColorStop(1, '#1a5a2a');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(e.x + e.w / 2, e.y + e.h / 2, e.w / 2 + sq, e.h / 2 - sq, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(e.x + 15, e.y + 15, 5, 0, Math.PI * 2); ctx.arc(e.x + e.w - 15, e.y + 15, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(e.x + 15, e.y + 15, 2.5, 0, Math.PI * 2); ctx.arc(e.x + e.w - 15, e.y + 15, 2.5, 0, Math.PI * 2); ctx.fill();
+  } else {
+    const wp = Math.sin(e.anim * 3) * 8;
+    ctx.fillStyle = '#8a5aaa';
+    ctx.beginPath(); ctx.ellipse(e.x - 5, e.y + e.h / 2 + wp, 20, 8, -0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(e.x + e.w + 5, e.y + e.h / 2 + wp, 20, 8, 0.5, 0, Math.PI * 2); ctx.fill();
+    const g = ctx.createRadialGradient(e.x + e.w / 2 - 5, e.y + e.h / 2 - 5, 3, e.x + e.w / 2, e.y + e.h / 2, e.w);
+    g.addColorStop(0, '#c080e0'); g.addColorStop(1, '#5a2080');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(e.x + e.w / 2, e.y + e.h / 2, e.w / 2, e.h / 2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f00'; ctx.shadowColor = '#f00'; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(e.x + 15, e.y + e.h / 2, 5, 0, Math.PI * 2); ctx.arc(e.x + e.w - 15, e.y + e.h / 2, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  if (e.hp < e.maxHp) {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(e.x, e.y - 14, e.w, 6);
+    ctx.fillStyle = '#f44'; ctx.fillRect(e.x, e.y - 14, e.w * (e.hp / e.maxHp), 6);
+  }
+}
+function drawPlayer() {
+  const x = player.x, y = player.y;
+  if (player.invuln > 0 && !hasInvulnBuff() && Math.floor(player.invuln / 60) % 2 === 0) return;
+  const wp = Math.sin(player.animation) * 4;
+  const isJ = !player.onGround, isA = player.attacking, isH = player.state === 'hurt';
+  if (hasInvulnBuff()) {
+    const pulse = 1 + Math.sin(now() * 0.01) * 0.15;
+    const auraGrad = ctx.createRadialGradient(x + player.w / 2, y + player.h / 2, 15, x + player.w / 2, y + player.h / 2, 55 * pulse);
+    auraGrad.addColorStop(0, 'rgba(79,195,247,0.4)'); auraGrad.addColorStop(0.6, 'rgba(79,195,247,0.2)'); auraGrad.addColorStop(1, 'rgba(79,195,247,0)');
+    ctx.fillStyle = auraGrad; ctx.beginPath(); ctx.arc(x + player.w / 2, y + player.h / 2, 55 * pulse, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(79,195,247,' + (0.5 + Math.sin(now() * 0.02) * 0.3) + ')';
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x + player.w / 2, y + player.h / 2, 45 * pulse, 0, Math.PI * 2); ctx.stroke();
+  }
+  if (hasInfiniteAmmo()) {
+    const pulse = 1 + Math.sin(now() * 0.008) * 0.1;
+    const auraGrad = ctx.createRadialGradient(x + player.w / 2, y + player.h / 2, 10, x + player.w / 2, y + player.h / 2, 40 * pulse);
+    auraGrad.addColorStop(0, 'rgba(255,217,61,0.3)'); auraGrad.addColorStop(0.7, 'rgba(255,217,61,0.15)'); auraGrad.addColorStop(1, 'rgba(255,217,61,0)');
+    ctx.fillStyle = auraGrad; ctx.beginPath(); ctx.arc(x + player.w / 2, y + player.h / 2, 40 * pulse, 0, Math.PI * 2); ctx.fill();
+    for (let i = 0; i < 4; i++) {
+      const angle = now() * 0.003 + i * Math.PI / 2;
+      const rad = 35;
+      const sx = x + player.w / 2 + Math.cos(angle) * rad;
+      const sy = y + player.h / 2 + Math.sin(angle) * rad;
+      ctx.fillStyle = 'rgba(255,217,61,0.8)'; ctx.beginPath(); ctx.arc(sx, sy, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath(); ctx.ellipse(x + player.w / 2, y + player.h + 5, 22, 6, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a2530';
+  // Лапки шагают вверх от земли: Math.max(0, ...) — иначе нога уходит на 4 px
+  // ниже хитбокса, то есть в землю.
+  if (isJ) { ctx.fillRect(x + 5, y + 40, 10, 18); ctx.fillRect(x + 20, y + 40, 10, 18); }
+  else {
+    ctx.fillRect(x + 5, y + 42 - Math.max(0, wp), 10, 18);
+    ctx.fillRect(x + 20, y + 42 - Math.max(0, -wp), 10, 18);
+  }
+  const bg = ctx.createLinearGradient(x, y + 15, x, y + 45);
+  if (isH) { bg.addColorStop(0, '#ffaaaa'); bg.addColorStop(1, '#cc4444'); }
+  else { bg.addColorStop(0, '#ff5c5c'); bg.addColorStop(1, '#b02828'); }
+  ctx.fillStyle = bg; ctx.fillRect(x + 4, y + 15, player.w - 8, 30);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(x + 6, y + 16, player.w - 12, 6);
+  if (player.combo > 0) {
+    ctx.fillStyle = '#ffd93d'; ctx.font = 'bold 18px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('x' + player.combo, x + player.w / 2, y - 10);
+  }
+  const hg = ctx.createRadialGradient(x + player.w / 2 - 4, y + 8, 3, x + player.w / 2, y + 12, 18);
+  hg.addColorStop(0, '#ffee88'); hg.addColorStop(1, isH ? '#ccaa44' : '#d4a017');
+  ctx.fillStyle = hg; ctx.fillRect(x + 6, y + 3, player.w - 12, 18);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x + 14, y + 8, 4, 4); ctx.fillRect(x + 22, y + 8, 4, 4);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x + 14, y + 8, 1, 1); ctx.fillRect(x + 22, y + 8, 1, 1);
+  ctx.fillStyle = '#000'; ctx.fillRect(x + 16, y + 15, 8, 2);
+  if (player.ammo > 0 && !hasInfiniteAmmo() && player.shootCooldown > SHOOT_CD * 0.5) {
+    ctx.fillStyle = '#ffd93d'; ctx.beginPath(); ctx.arc(x + player.w + 5, y + 20, 6, 0, Math.PI * 2); ctx.fill();
+  }
+  if (isA) {
+    // Меч рисуем в ту же сторону, куда бьёт attackRect: в откате (facing -1)
+    // клинок раньше оставался справа и расходился с ударом.
+    ctx.save();
+    if (player.facing < 0) {
+      const mid = x + player.w / 2;
+      ctx.translate(mid, 0); ctx.scale(-1, 1); ctx.translate(-mid, 0);
+    }
+    const phase = 1 - player.attackTimer / ATTACK_TIME;
+    const sx = x + player.w + 5 + Math.sin(phase * Math.PI) * 8;
+    const sy = y + 10 + Math.sin(phase * Math.PI) * 10;
+    ctx.shadowColor = '#fff'; ctx.shadowBlur = 15;
+    const bgr = ctx.createLinearGradient(sx, sy, sx, sy + 5);
+    bgr.addColorStop(0, '#ffffff'); bgr.addColorStop(1, '#aab0c0');
+    ctx.fillStyle = bgr; ctx.fillRect(sx, sy, 36, 5);
+    ctx.fillStyle = '#8B5A2B'; ctx.fillRect(sx + 30, sy - 3, 8, 11);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(255,255,255,' + (1 - phase) + ')';
+    ctx.beginPath(); ctx.arc(x + player.w + 20, y + 22, 30 * phase, -Math.PI / 2, Math.PI / 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ================================================================
+// ============ МУХА-СТРИМЕР (вебка) =============================
+// ================================================================
+const streamerCanvas = document.getElementById('streamerCanvas');
+const sCtx = streamerCanvas.getContext('2d');
+const SW = 240, SH = 240;
+
+// Комната за мухой: тот же радиальный градиент, но испечённый один раз.
+let flyRoom = null;
+function flyRoomLayer() {
+  if (flyRoom) return flyRoom;
+  const cv = document.createElement('canvas');
+  cv.width = SW; cv.height = SH;
+  const g = cv.getContext('2d');
+  const bgGrad = g.createRadialGradient(SW / 2, SH / 2 - 10, 20, SW / 2, SH / 2, SW * 0.75);
+  bgGrad.addColorStop(0, '#2b2b33');
+  bgGrad.addColorStop(1, '#0c0c10');
+  g.fillStyle = bgGrad; g.fillRect(0, 0, SW, SH);
+  flyRoom = cv;
+  return cv;
+}
+
+const streamer = {
+  blinkTimer: 0,        // для моргания
+  isBlinking: false,
+  mouthOpen: 0,         // 0..1 для эмоций
+  excitement: 0,        // 0..1
+  panic: 0,             // 0..1
+  eyeX: 0, eyeY: 0,     // смещение зрачков
+  legPhase: 0,
+  lastHp: 100,
+  lastDeaths: 0,
+  lastCombo: 0,
+  reactionText: '',
+  reactionTimer: 0,
+  // Для реакции на игру
+  lastPlayerX: 140,
+  airTime: 0,
+  onGroundFrames: 0
+};
+
+function updateStreamer(dt) {
+  const S = streamer;
+  const prevReaction = S.reactionText;
+
+  // Реакции на события игры
+  if (player.hp < S.lastHp - 5) {
+    // Получил урон — паника
+    S.panic = 1;
+    S.mouthOpen = 1;
+    S.reactionText = ['ОЙ!', 'АЙ!', 'БОЛЬНО!', 'НЕЕЕТ!'][Math.floor(Math.random() * 4)];
+    S.reactionTimer = 900;
+  }
+  S.lastHp = player.hp;
+
+  if (Brain.deaths > S.lastDeaths) {
+    S.panic = 1;
+    S.excitement = 0.3;
+    S.mouthOpen = 1;
+    S.reactionText = ['БЛИН!', 'ЧЁ ЗА...', 'ОПЯТЬ!', 'Я ЖЕ МОГУ!'][Math.floor(Math.random() * 4)];
+    S.reactionTimer = 1500;
+  }
+  S.lastDeaths = Brain.deaths;
+
+  if (player.combo > S.lastCombo && player.combo >= 3) {
+    S.excitement = 1;
+    S.mouthOpen = 1;
+    S.reactionText = ['КОМБО x' + player.combo + '!', 'ЖАРА!', 'ИДЁТ!', 'ПОШЛА ЖАРА!'][Math.floor(Math.random() * 4)];
+    S.reactionTimer = 900;
+  }
+  S.lastCombo = player.combo;
+
+  // Убийство — радость
+  if (Brain.totalKills > (S._lastKills || 0)) {
+    S.excitement = Math.min(1, S.excitement + 0.4);
+    if (Math.random() < 0.3) {
+      S.reactionText = ['+1!', 'ИЗИ!', 'ГОТОВ!', 'GG!'][Math.floor(Math.random() * 4)];
+      S.reactionTimer = 500;
+    }
+  }
+  S._lastKills = Brain.totalKills;
+
+  // Плавное затухание эмоций
+  S.panic *= 0.96;
+  S.excitement *= 0.97;
+  S.mouthOpen *= 0.95;
+  if (S.reactionTimer > 0) S.reactionTimer -= dt;
+  if (S.reactionTimer <= 0) S.reactionText = '';
+  if (S.reactionText && S.reactionText !== prevReaction) speakReaction(S.reactionText);
+
+  // Моргание раз в 2-5 секунд
+  S.blinkTimer -= dt;
+  if (S.blinkTimer <= 0) {
+    S.isBlinking = true;
+    S.blinkTimer = 100;
+    if (!S._blinkDone) {
+      S._blinkDone = true;
+      setTimeout(() => { S.isBlinking = false; S._blinkDone = false; }, 120);
+      S.blinkTimer = 2000 + Math.random() * 3000;
+    }
+  }
+
+  // Блик-«зрачок» следит за ходом игры. По горизонтали позиция героя на экране
+  // не меняется (камера едет за ним), поэтому раньше блик стоял на месте —
+  // ведём его по разбегу и откату, а по вертикали — по высоте героя.
+  const playerScreenY = player.y / H;
+  const targetEyeX = clamp(player.facing * 1.5 + player.vx * 0.9, -5, 5);
+  const targetEyeY = clamp((playerScreenY - 0.5) * 6, -4, 4);
+  S.eyeX += (targetEyeX - S.eyeX) * 0.15;
+  S.eyeY += (targetEyeY - S.eyeY) * 0.15;
+
+  // Лапки двигаются как будто на клавиатуре
+  S.legPhase += 0.3 + S.excitement * 0.5 + S.panic * 0.7;
+
+  // Воздух/земля
+  if (player.onGround) S.onGroundFrames++;
+  else S.onGroundFrames = 0;
+}
+
+// Гексагональная упаковка фасеток мушиного глаза — считается один раз
+const EYE_R = 15;
+const eyeFacets = (() => {
+  const facets = [];
+  const step = 3.2;
+  const rowH = step * 0.87;
+  for (let row = -6; row <= 6; row++) {
+    const y = row * rowH;
+    const xOffset = (row % 2 === 0) ? 0 : step / 2;
+    for (let col = -6; col <= 6; col++) {
+      const x = col * step + xOffset;
+      const d = Math.sqrt(x * x + y * y);
+      if (d <= EYE_R - 0.5) facets.push({ x, y, d, a: Math.atan2(y, x) });
+    }
+  }
+  return facets;
+})();
+
+function drawFlyEye(S, ex, eyeY, blinking) {
+  if (blinking) {
+    sCtx.fillStyle = '#2a0a14';
+    sCtx.beginPath();
+    sCtx.ellipse(ex, eyeY, EYE_R, 2, 0, 0, Math.PI * 2);
+    sCtx.fill();
+    return;
+  }
+  // Купол глаза
+  const domeGrad = sCtx.createRadialGradient(ex - 4, eyeY - 5, 1, ex, eyeY, EYE_R);
+  domeGrad.addColorStop(0, '#7a2438');
+  domeGrad.addColorStop(0.55, '#4a1424');
+  domeGrad.addColorStop(1, '#230a14');
+  sCtx.fillStyle = domeGrad;
+  sCtx.beginPath();
+  sCtx.arc(ex, eyeY, EYE_R, 0, Math.PI * 2);
+  sCtx.fill();
+
+  // Перламутровый отлив по фасеткам (структурная окраска хитина)
+  const shimmer = now() * 0.0006;
+  for (const f of eyeFacets) {
+    const hue = (200 + Math.sin(f.a * 3 + shimmer) * 40 + 160) % 360;
+    const shade = 0.35 + 0.5 * (1 - f.d / EYE_R) + Math.sin(f.a * 5 + shimmer * 2) * 0.08;
+    sCtx.fillStyle = `hsla(${hue}, 55%, ${28 + shade * 20}%, ${0.3 + shade * 0.25})`;
+    sCtx.beginPath();
+    sCtx.arc(ex + f.x, eyeY + f.y, 1.4, 0, Math.PI * 2);
+    sCtx.fill();
+  }
+
+  // Направленный блик вместо зрачка — глаз следит за игроком без "человеческого" вида
+  const hlx = ex + S.eyeX * 1.4;
+  const hly = eyeY + S.eyeY * 1.2;
+  const hlGrad = sCtx.createRadialGradient(hlx, hly, 0, hlx, hly, 6);
+  hlGrad.addColorStop(0, 'rgba(255,255,255,0.5)');
+  hlGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  sCtx.fillStyle = hlGrad;
+  sCtx.beginPath();
+  sCtx.arc(hlx, hly, 6, 0, Math.PI * 2);
+  sCtx.fill();
+
+  sCtx.strokeStyle = 'rgba(0,0,0,0.45)';
+  sCtx.lineWidth = 1;
+  sCtx.beginPath();
+  sCtx.arc(ex, eyeY, EYE_R, 0, Math.PI * 2);
+  sCtx.stroke();
+}
+
+function drawStreamer(dt) {
+  const S = streamer;
+  // Фон «комнаты» — радиальный градиент на весь кадр вебки, каждый кадр заново.
+  // Печём один раз: он не меняется.
+  sCtx.drawImage(flyRoomLayer(), 0, 0);
+
+  // Тень мухи на "столе"
+  sCtx.fillStyle = 'rgba(0,0,0,0.4)';
+  sCtx.beginPath();
+  sCtx.ellipse(SW / 2, SH - 30, 60, 12, 0, 0, Math.PI * 2);
+  sCtx.fill();
+
+  // ============ МУХА ============
+  const cx = SW / 2;
+  const cy = SH / 2 + 10;
+  // Тряска при панике
+  const shakeX = S.panic > 0.3 ? (Math.random() - 0.5) * S.panic * 8 : 0;
+  const shakeY = S.panic > 0.3 ? (Math.random() - 0.5) * S.panic * 6 : 0;
+  sCtx.save();
+  sCtx.translate(cx + shakeX, cy + shakeY);
+
+  // Крылья (за телом) — быстро машут при возбуждении
+  const wingPhase = now() * (0.02 + S.excitement * 0.03);
+  const wingAngle = Math.sin(wingPhase) * 0.4;
+
+  function drawWing(mirror) {
+    sCtx.save();
+    sCtx.translate(25 * mirror, -30);
+    sCtx.rotate(mirror * (0.5 - wingAngle * mirror));
+    const wingGrad = sCtx.createLinearGradient(-18, -8, 20, 8);
+    wingGrad.addColorStop(0, 'rgba(210,225,255,0.15)');
+    wingGrad.addColorStop(0.6, 'rgba(200,215,255,0.32)');
+    wingGrad.addColorStop(1, 'rgba(170,190,230,0.4)');
+    sCtx.fillStyle = wingGrad;
+    sCtx.beginPath();
+    sCtx.ellipse(0, 0, 22, 10, 0, 0, Math.PI * 2);
+    sCtx.fill();
+    sCtx.strokeStyle = 'rgba(140,160,200,0.55)';
+    sCtx.lineWidth = 1;
+    sCtx.stroke();
+    // Прожилки крыла
+    sCtx.strokeStyle = 'rgba(100,110,140,0.5)';
+    sCtx.lineWidth = 0.7;
+    sCtx.beginPath();
+    sCtx.moveTo(-18, 0); sCtx.quadraticCurveTo(0, -4, 19, -1);
+    sCtx.moveTo(-16, 3); sCtx.quadraticCurveTo(-2, 4, 16, 4);
+    sCtx.moveTo(-14, -4); sCtx.lineTo(-2, 4);
+    sCtx.moveTo(2, -5); sCtx.lineTo(10, 5);
+    sCtx.stroke();
+    sCtx.restore();
+  }
+  drawWing(-1);
+  drawWing(1);
+
+  // Гальтеры (жужжальца) — маленькие булавовидные органы позади крыльев.
+  // Выносим их за силуэт тела: на ±14/-14 они целиком уходили под тело
+  // (эллипс 42x38) и в кадре их не было вовсе.
+  sCtx.fillStyle = 'rgba(78,66,54,0.95)';
+  sCtx.strokeStyle = 'rgba(78,66,54,0.95)';
+  sCtx.lineWidth = 1.4;
+  for (const s of [-1, 1]) {
+    const hx = s * 34, hy = -10;
+    sCtx.beginPath();
+    sCtx.moveTo(hx, hy);
+    sCtx.lineTo(hx + s * 18, hy + 12);
+    sCtx.stroke();
+    sCtx.beginPath();
+    sCtx.arc(hx + s * 18, hy + 12, 3, 0, Math.PI * 2);
+    sCtx.fill();
+  }
+
+  // Тело мухи (тёмное, пушистое)
+  const bodyGrad = sCtx.createRadialGradient(-8, -8, 5, 0, 0, 50);
+  bodyGrad.addColorStop(0, '#4a4a52');
+  bodyGrad.addColorStop(0.7, '#2a2a32');
+  bodyGrad.addColorStop(1, '#1a1a22');
+  sCtx.fillStyle = bodyGrad;
+  sCtx.beginPath();
+  sCtx.ellipse(0, 0, 42, 38, 0, 0, Math.PI * 2);
+  sCtx.fill();
+
+  // Полоски на теле мухи
+  sCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+  sCtx.lineWidth = 2;
+  sCtx.beginPath();
+  sCtx.ellipse(0, 0, 42, 12, 0, 0, Math.PI * 2);
+  sCtx.stroke();
+  sCtx.beginPath();
+  sCtx.ellipse(0, 0, 42, 24, 0, 0, Math.PI * 2);
+  sCtx.stroke();
+
+  // Пушистость (мелкие волоски)
+  sCtx.strokeStyle = 'rgba(60,60,70,0.8)';
+  sCtx.lineWidth = 1;
+  for (let i = 0; i < 20; i++) {
+    const angle = (i / 20) * Math.PI * 2;
+    const x1 = Math.cos(angle) * 42;
+    const y1 = Math.sin(angle) * 38;
+    const x2 = Math.cos(angle) * 48;
+    const y2 = Math.sin(angle) * 44;
+    sCtx.beginPath();
+    sCtx.moveTo(x1, y1);
+    sCtx.lineTo(x2, y2);
+    sCtx.stroke();
+  }
+
+  // Блик на теле
+  sCtx.fillStyle = 'rgba(150,150,170,0.4)';
+  sCtx.beginPath();
+  sCtx.ellipse(-15, -15, 12, 8, -0.5, 0, Math.PI * 2);
+  sCtx.fill();
+
+  // Металлический перелив хитина (как у настоящей мухи — зеленовато-фиолетовый отлив)
+  const shimmerT = now() * 0.0009;
+  sCtx.save();
+  sCtx.beginPath();
+  sCtx.ellipse(0, 0, 42, 38, 0, 0, Math.PI * 2);
+  sCtx.clip();
+  const irid = sCtx.createLinearGradient(-40, -30, 40, 30);
+  irid.addColorStop(0, `hsla(${(150 + Math.sin(shimmerT) * 30) % 360},55%,45%,0.10)`);
+  irid.addColorStop(0.5, `hsla(${(260 + Math.sin(shimmerT + 1) * 30) % 360},50%,40%,0.08)`);
+  irid.addColorStop(1, `hsla(${(320 + Math.sin(shimmerT + 2) * 30) % 360},50%,45%,0.10)`);
+  sCtx.fillStyle = irid;
+  sCtx.fillRect(-45, -45, 90, 90);
+  sCtx.restore();
+
+  // ============ ГЛАЗА ============
+  // Огромные фасеточные глаза, занимающие большую часть головы, без "человеческих" зрачков/бровей
+  const eyeY = -8;
+  const eyeSpacing = 15;
+  for (let side = -1; side <= 1; side += 2) {
+    drawFlyEye(S, side * eyeSpacing, eyeY, S.isBlinking);
+  }
+
+  // ============ РОТ ============
+  const mouthY = 18;
+  // Рот открывается при разговоре/эмоциях
+  const mouthHeight = 4 + S.mouthOpen * 14;
+
+  if (mouthHeight > 6) {
+    // Открытый рот
+    sCtx.fillStyle = '#000';
+    sCtx.beginPath();
+    sCtx.ellipse(0, mouthY, 12, mouthHeight, 0, 0, Math.PI * 2);
+    sCtx.fill();
+    // Язычок
+    sCtx.fillStyle = '#c04040';
+    sCtx.beginPath();
+    sCtx.ellipse(0, mouthY + mouthHeight * 0.3, 7, mouthHeight * 0.4, 0, 0, Math.PI * 2);
+    sCtx.fill();
+  } else {
+    // Улыбка/простая линия
+    sCtx.strokeStyle = '#000';
+    sCtx.lineWidth = 2;
+    sCtx.beginPath();
+    if (S.excitement > 0.3) {
+      // Широкая улыбка
+      sCtx.arc(0, mouthY - 4, 10, 0.2, Math.PI - 0.2);
+    } else {
+      // Прямая линия
+      sCtx.moveTo(-8, mouthY);
+      sCtx.lineTo(8, mouthY);
+    }
+    sCtx.stroke();
+  }
+
+  // ============ УСИКИ ============
+  sCtx.strokeStyle = '#1a1a22';
+  sCtx.lineWidth = 2;
+  const antennaWiggle = Math.sin(now() * 0.005 + S.excitement * 5) * 3;
+  // Левый усик
+  sCtx.beginPath();
+  sCtx.moveTo(-18, -32);
+  sCtx.quadraticCurveTo(-30, -60 + antennaWiggle, -35, -75);
+  sCtx.stroke();
+  sCtx.fillStyle = '#1a1a22';
+  sCtx.beginPath();
+  sCtx.arc(-35, -75, 3, 0, Math.PI * 2);
+  sCtx.fill();
+  // Правый усик
+  sCtx.beginPath();
+  sCtx.moveTo(18, -32);
+  sCtx.quadraticCurveTo(30, -60 - antennaWiggle, 35, -75);
+  sCtx.stroke();
+  sCtx.beginPath();
+  sCtx.arc(35, -75, 3, 0, Math.PI * 2);
+  sCtx.fill();
+
+  // ============ ЛАПКИ (жмут клавиши) ============
+  // Передние лапки на "клавиатуре" перед мухой
+  const legY = 40;
+  const legPhase1 = Math.sin(S.legPhase) * 8;
+  const legPhase2 = Math.sin(S.legPhase + 1.5) * 8;
+  const legPhase3 = Math.sin(S.legPhase + 3) * 6;
+
+  sCtx.strokeStyle = '#1a1a22';
+  sCtx.lineWidth = 3;
+  sCtx.lineCap = 'round';
+
+  // Левая передняя лапка
+  sCtx.beginPath();
+  sCtx.moveTo(-25, 25);
+  sCtx.quadraticCurveTo(-35, legY - 10 + legPhase1, -35, legY + legPhase1);
+  sCtx.stroke();
+  // Правая передняя лапка
+  sCtx.beginPath();
+  sCtx.moveTo(25, 25);
+  sCtx.quadraticCurveTo(35, legY - 10 + legPhase2, 35, legY + legPhase2);
+  sCtx.stroke();
+  // Средние лапки
+  sCtx.beginPath();
+  sCtx.moveTo(-30, 10);
+  sCtx.quadraticCurveTo(-42, 25 + legPhase3, -45, 35 + legPhase3);
+  sCtx.stroke();
+  sCtx.beginPath();
+  sCtx.moveTo(30, 10);
+  sCtx.quadraticCurveTo(42, 25 - legPhase3, 45, 35 - legPhase3);
+  sCtx.stroke();
+
+  sCtx.lineCap = 'butt';
+
+  // ============ МИКРОФОН ============
+  // Микрофон перед мухой
+  sCtx.save();
+  sCtx.translate(-60, 30);
+  // Стойка
+  sCtx.strokeStyle = '#222';
+  sCtx.lineWidth = 3;
+  sCtx.beginPath();
+  sCtx.moveTo(0, 0);
+  sCtx.lineTo(0, 40);
+  sCtx.stroke();
+  // Тело микрофона
+  sCtx.fillStyle = '#444';
+  sCtx.beginPath();
+  sCtx.ellipse(0, -5, 6, 12, 0, 0, Math.PI * 2);
+  sCtx.fill();
+  // Решётка
+  sCtx.fillStyle = '#666';
+  sCtx.beginPath();
+  sCtx.ellipse(0, -10, 5, 6, 0, 0, Math.PI * 2);
+  sCtx.fill();
+  sCtx.strokeStyle = '#222';
+  sCtx.lineWidth = 0.5;
+  for (let i = 0; i < 3; i++) {
+    sCtx.beginPath();
+    sCtx.moveTo(-5, -12 + i * 3);
+    sCtx.lineTo(5, -12 + i * 3);
+    sCtx.stroke();
+  }
+  sCtx.restore();
+
+  sCtx.restore(); // восстановить из тряски
+
+  // ============ РЕАКЦИЯ (текст) ============
+  if (S.reactionText && S.reactionTimer > 0) {
+    const alpha = Math.min(1, S.reactionTimer / 300);
+    const bounce = Math.sin(now() * 0.02) * 3;
+    sCtx.save();
+    sCtx.globalAlpha = alpha;
+    sCtx.fillStyle = '#ff3860';
+    sCtx.strokeStyle = '#fff';
+    sCtx.lineWidth = 3;
+    // Круглая маска вебки узкая у краёв кадра: буквы на 22 px срезались по
+    // дуге, поэтому строку держим ниже и мельче, где круг широкий.
+    sCtx.font = 'bold 20px Courier New';
+    sCtx.textAlign = 'center';
+    sCtx.strokeText(S.reactionText, SW / 2, 46 + bounce);
+    sCtx.fillText(S.reactionText, SW / 2, 46 + bounce);
+    sCtx.restore();
+  }
+
+  // ============ ИНДИКАТОР ЭМОЦИЙ ============
+  // Полоска «стрим-энергии». Раньше лежала на самой кромке кадра: круглая маска
+  // оставляла от неё тридцать пикселей из двухсот сорока. Держим над нижней
+  // плашкой, где круг широкий.
+  const barW = SW * 0.6, barX = (SW - barW) / 2, barY = SH - 30, barH = 6;
+  sCtx.fillStyle = 'rgba(0,0,0,0.5)';
+  sCtx.fillRect(barX, barY, barW, barH);
+  const energy = Math.min(1, (S.excitement + S.panic + (player.combo / 10)) / 2);
+  const energyGrad = sCtx.createLinearGradient(barX, 0, barX + barW, 0);
+  energyGrad.addColorStop(0, '#7CFC00');
+  energyGrad.addColorStop(0.5, '#ffd93d');
+  energyGrad.addColorStop(1, '#ff3860');
+  sCtx.fillStyle = energyGrad;
+  sCtx.fillRect(barX, barY, barW * energy, barH);
+
+  // Нижняя плашка "СЕЙЧАС В ЭФИРЕ"
+  sCtx.fillStyle = 'rgba(0,0,0,0.6)';
+  sCtx.fillRect(0, SH - 18, SW, 18);
+  sCtx.fillStyle = '#fff';
+  sCtx.font = 'bold 11px Courier New';
+  sCtx.textAlign = 'center';
+  const statusText = S.panic > 0.4 ? 'ПАНИКА!' :
+                     S.excitement > 0.5 ? 'ХАЙП!' :
+                     player.combo > 2 ? 'КОМБО!' : 'PLAY';
+  sCtx.fillText(statusText, SW / 2, SH - 5);
+}
+
+// ================================================================
+// ============ HUD И ВЕБКА НА ХОЛСТЕ =============================
+// ================================================================
+// Раньше это была разметка поверх канваса: в браузере она видна, а в эфире
+// страницы нет — только кадр. Поэтому те же строки, полоса прогресса и круглая
+// вебка мухи рисуются прямо на холсте: браузер и эфир показывают одно и то же.
+const hud = {
+  hp: 100, dist: 0, kills: 0, ammo: '0', deaths: 0, combo: 0, time: '0:00',
+  buffs: [], progress: 0
+};
+
+// Подписи HUD (HP, Дистанция, …) не меняются, а текста в кадре немало: замер
+// показал 2.8 мс. Печём подписи вместе с их тенями в небольшой слой — в кадре
+// остаётся одна накладка и только цифры.
+const HUD_LABELS = ['HP:', 'Дистанция:', 'Убито:', 'Патроны:', 'Смертей:', 'Комбо:', 'Время:'];
+let hudLabels = null;
+let hudValueX = [];
+function hudLabelsLayer(k) {
+  if (hudLabels) return hudLabels;
+  const cv = document.createElement('canvas');
+  cv.width = Math.ceil(280 * k); cv.height = Math.ceil(300 * k);
+  const g = cv.getContext('2d');
+  g.font = `bold ${Math.round(18 * k)}px 'Courier New', monospace`;
+  g.textAlign = 'left';
+  const x0 = Math.round(19 * k);
+  let y = Math.round(38 * k);
+  hudValueX = [];
+  for (const label of HUD_LABELS) {
+    g.fillStyle = 'rgba(0,0,0,0.8)';
+    g.fillText(label, x0 + 2, y + 2);
+    g.fillStyle = '#99aaaa';
+    g.fillText(label, x0, y);
+    hudValueX.push(x0 + g.measureText(label + ' ').width);
+    y += Math.round(29 * k);
+  }
+  hudLabels = cv;
+  return hudLabels;
+}
+
+function drawHud() {
+  const g = ctx;
+  const k = W / 1280;                 // HUD задан в пикселях кадра 1280x720
+
+  // левая колонка: подписи готовым слоем, поверх — только значения
+  g.drawImage(hudLabelsLayer(k), 0, 0);
+  g.save();
+  g.textAlign = 'left';
+  g.font = `bold ${Math.round(18 * k)}px 'Courier New', monospace`;
+  const values = [
+    [hud.hp, '#ff5555'],
+    [hud.dist, '#ffd93d'],
+    [hud.kills, '#7CFC00'],
+    [hud.ammo, '#ff9a00'],
+    [hud.deaths, '#ff5555'],
+    [hud.combo, '#ff9a00'],
+    [hud.time, '#ffd93d'],
+  ];
+  let y = Math.round(38 * k);
+  for (let i = 0; i < values.length; i++) {
+    const [value, color] = values[i];
+    const x = hudValueX[i];
+    g.fillStyle = 'rgba(0,0,0,0.8)';
+    g.fillText(String(value), x + 2, y + 2);
+    g.fillStyle = color;
+    g.fillText(String(value), x, y);
+    y += Math.round(29 * k);
+  }
+  g.restore();
+
+  // правая колонка: временные бонусы
+  const bx = W - Math.round(19 * k);
+  if (hud.buffs.length) {
+    g.save();
+    g.textAlign = 'right';
+    g.font = `bold ${Math.round(17 * k)}px 'Courier New', monospace`;
+    let by = Math.round(37 * k);
+    for (const buff of hud.buffs) {
+      g.fillStyle = 'rgba(0,0,0,0.8)';
+      g.fillText(buff.text, bx + 2, by + 2);
+      g.fillStyle = buff.color;
+      g.fillText(buff.text, bx, by);
+      by += Math.round(28 * k);
+    }
+    g.restore();
+  }
+
+  // полоса пятичасового забега
+  const pw = W * 0.6, ph = Math.max(6, Math.round(10 * k));
+  const px = W * 0.2, py = H * 0.97 - ph;
+  g.save();
+  g.fillStyle = 'rgba(0,0,0,0.55)';
+  g.fillRect(px, py, pw, ph);
+  g.strokeStyle = '#000';
+  g.lineWidth = 2;
+  g.strokeRect(px, py, pw, ph);
+  const grad = g.createLinearGradient(px, 0, px + pw, 0);
+  grad.addColorStop(0, '#ffd93d');
+  grad.addColorStop(1, '#ff9a00');
+  g.fillStyle = grad;
+  g.fillRect(px + 2, py + 2, Math.max(0, (pw - 4) * hud.progress / 100), ph - 4);
+  g.restore();
+}
+
+function drawStreamerCam() {
+  const g = ctx;
+  const size = W * 0.18;
+  const x = W * 0.02, y = H - H * 0.04 - size;
+  const cx = x + size / 2, cy = y + size / 2, r = size / 2;
+  g.save();
+  g.beginPath();
+  g.arc(cx, cy, r, 0, Math.PI * 2);
+  g.fillStyle = '#12121a';
+  g.fill();
+  g.save();
+  g.clip();
+  g.drawImage(streamerCanvas, x, y, size, size);   // кадр мухи внутри круга
+  g.restore();
+  g.beginPath();
+  g.arc(cx, cy, r - 1, 0, Math.PI * 2);
+  g.strokeStyle = 'rgba(255,255,255,0.08)';
+  g.lineWidth = 2;
+  g.stroke();
+  // точка записи: мигает, как в прямом эфире. Ставим её на кольцо — раньше она
+  // висела в углу квадрата вебки, то есть за пределами круга.
+  const pulse = 0.68 + 0.32 * Math.sin(now() * 0.004);
+  g.beginPath();
+  g.arc(cx - r * 0.7, cy - r * 0.7, Math.max(3, 4 * (W / 1280)), 0, Math.PI * 2);
+  g.fillStyle = `rgba(255,59,59,${pulse.toFixed(3)})`;
+  g.fill();
+  g.restore();
+}
+
+// ================================================================
+// ============ ЦИКЛ =============================================
+// ================================================================
+let lastTime = performance.now();
+let loopErrorCount = 0;
+
+// Физика игры писалась под 60 кадров в секунду: игрок и враги сдвигаются на
+// фиксированный шаг за кадр, и ИИ считает ходы в кадрах (15, 35, 45). В эфире
+// кадров тридцать, и на одном шаге за кадр всё шло бы ровно вдвое медленнее —
+// поэтому копим прошедшее время и делаем столько шагов по 1/60, сколько накопилось.
+// Рисование при этом одно на кадр, так что эфир не дорожает.
+const STEP_MS = 1000 / 60;
+let stepAccum = 0;
+
+function loop(n) {
+  try {
+    const dt = Math.min(100, n - lastTime);
+    lastTime = n;
+    stepAccum += dt;
+    let steps = 0;
+    while (stepAccum >= STEP_MS && steps < 8) {
+      update(STEP_MS);
+      stepAccum -= STEP_MS;
+      steps++;
+    }
+    draw();
+    updateStreamer(dt);
+    drawStreamer(dt);
+    drawStreamerCam();     // вебка мухи поверх мира
+    drawHud();             // и HUD поверх всего
+  } catch (e) {
+    loopErrorCount++;
+    // Раньше после первых четырёх ошибок лог замолкал навсегда, и сбой на
+    // пятом часу эфира никто бы не увидел. Теперь каждые 300 ошибок — строка.
+    if (loopErrorCount < 5 || loopErrorCount % 300 === 0) {
+      console.error('Loop error #' + loopErrorCount + ':', e);
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+ensureGenerated(W * 3);
+requestAnimationFrame(loop);
+
+// ============ УПРАВЛЕНИЕ ЗВУКОМ ============
+// Кнопка и разблокировка звука по первому нажатию — удобства страницы. В эфире
+// страницы нет: там звук включает сам источник, у которого тоже есть
+// document.addEventListener, — поэтому всё под проверками.
+const soundBtn = document.getElementById('soundToggle');
+function setSoundBtn(on) {
+  if (!soundBtn || !soundBtn.classList) return;
+  soundBtn.textContent = on ? '🔊' : '🔈';
+  soundBtn.classList.toggle('muted', !on);
+}
+if (soundBtn && soundBtn.addEventListener) {
+  soundBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setSoundBtn(AudioEngine.toggle());
+  });
+}
+if (document.addEventListener) {
+  document.addEventListener('pointerdown', () => {
+    if (!AudioEngine.enabled) { AudioEngine.resume(); setSoundBtn(true); }
+  }, { once: true });
+}
+</script>
+</body>
+</html>

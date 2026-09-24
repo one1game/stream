@@ -31,7 +31,26 @@ import start_stream as ss  # noqa: E402  — переиспользуем пре
 
 OUT_DIR = ROOT / "tools" / "preview_out"
 PORT = 8765
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
+
+
+def find_ffmpeg() -> str:
+    """FFmpeg для локального показа.
+
+    Сначала переменная окружения, потом своя сборка в tools/ffmpeg (её кладут
+    рядом, чтобы предпросмотр не зависел от системного PATH), и только затем
+    ffmpeg из PATH.
+    """
+    override = os.environ.get("FFMPEG")
+    if override:
+        return override
+    local = ROOT / "tools" / "ffmpeg" / "bin"
+    for name in ("ffmpeg.exe", "ffmpeg"):
+        if (local / name).exists():
+            return str(local / name)
+    return "ffmpeg"
+
+
+FFMPEG = find_ffmpeg()
 
 PLAYER = """<!DOCTYPE html>
 <html lang="ru"><head><meta charset="UTF-8">
@@ -65,7 +84,7 @@ PLAYER = """<!DOCTYPE html>
 
 
 def hls_command(src: tuple[int, int, int], out: tuple[int, int, int],
-                video_port: int, audio_port: int) -> list[str]:
+                video_port: int, audio_port: int, grain: bool = True) -> list[str]:
     width, height, fps = src
     out_w, out_h, out_fps = out
     filters = []
@@ -76,7 +95,8 @@ def hls_command(src: tuple[int, int, int], out: tuple[int, int, int],
     # Источник рисует реже эфира — сначала добираем кадры до эфирной частоты,
     # потом зерно, чтобы дублированные кадры друг от друга отличались.
     filters.append(f"fps={out_fps}")
-    filters.append("noise=alls=5:allf=t")
+    if grain:
+        filters.append("noise=alls=5:allf=t")
     return [
         FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "warning",
         "-f", "rawvideo", "-pix_fmt", "rgba",
@@ -140,7 +160,7 @@ def main() -> int:
         command.append(f"--genre={args.genre}")
 
     print(f"Источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}, "
-          f"режим {args.quality}.", flush=True)
+          f"режим {args.quality}, звук {ss.audio_for(args.video)}.", flush=True)
     source = subprocess.Popen(
         command, cwd=str(ROOT),
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -168,7 +188,8 @@ def main() -> int:
 
     video_port, audio_port, src_fps = ports["p"]
     encoder = subprocess.Popen(
-        hls_command((src[0], src[1], src_fps), out, video_port, audio_port),
+        hls_command((src[0], src[1], src_fps), out, video_port, audio_port,
+                    ss.grain_for(args.video)),
         cwd=str(ROOT))
 
     server = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)

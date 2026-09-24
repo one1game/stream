@@ -2,11 +2,15 @@
 """Гонит процедурный эфир на YouTube по постоянному stream key.
 
 Картинку и звук отдаёт scripts/stream_source.mjs — он исполняет сцену
-(newvideo.html — улица, либо game_video.html — игры) на Skia-канвасе и
-радио-движок из radio/ прямо в Node, без браузера. Этот скрипт только
-связывает источник с FFmpeg и следит за дедлайном.
+(newvideo.html — улица, либо muxa.html — автоплатформер «стрим мухи», либо
+game_video.html — генератор игр) на Skia-канвасе и звук игры из
+scripts/webaudio.mjs либо радио-движок из radio/ прямо в Node, без браузера.
+Этот скрипт только связывает источник с FFmpeg и следит за дедлайном.
 
-    python start_stream.py --minutes 348
+    python start_stream.py --minutes 300
+
+Пять часов — длина забега в muxa.html: эфир кончается ровно тогда, когда игра
+показывает финал, и последние минуты в кадре стоит плашка про пройденные часы.
 """
 
 from __future__ import annotations
@@ -47,7 +51,25 @@ QUALITY = {
 # картинку до эфирных 1280x720 сглаженно и кладёт зерно — выходит мягко и
 # плёночно, зато движения заметно больше. Генератору игр растяжка вредна: она
 # мылит пиксель-арт, поэтому он рисует ровно в эфирном разрешении.
-RENDER_SCALE = {"newvideo.html": 0.75, "game_video.html": 1.0}
+RENDER_SCALE = {"newvideo.html": 0.75, "game_video.html": 1.0, "muxa.html": 0.75}
+
+# Чей звук в эфире. Улица живёт под процедурное радио, у игры свой звук: она
+# собирает его через Web Audio, а в эфире сводит офлайн-движок источника.
+AUDIO_BY_VIDEO = {"newvideo.html": "radio", "game_video.html": "radio", "muxa.html": "game"}
+
+# Кладём ли в кадр зерно.
+#
+# Улице оно нужно: картинка мягкая под плёнку, и повторённые кадры друг от
+# друга отличаются. Игре — нет: спрайты от зерна только мылятся, а кодировщику
+# оно стоит дороже всех остальных фильтров вместе (замер: +41% CPU). На
+# четырёх ядрах раннера это уводило ядра у источника: кадров 1330 из 1800 за
+# минуту, повторов 26%. Без зерна повторов 5% — игра едет ровно.
+GRAIN_BY_VIDEO = {"muxa.html": False}
+
+
+def grain_for(video: str) -> bool:
+    """Кладём ли в кадр этой сцены зерно."""
+    return GRAIN_BY_VIDEO.get(video, True)
 
 
 def sizes(video: str, quality: str) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
@@ -88,20 +110,26 @@ def log(message: str) -> None:
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {message}", flush=True)
 
 
+def audio_for(video: str) -> str:
+    """Чей звук идёт в эфир вместе с этой сценой."""
+    return AUDIO_BY_VIDEO.get(video, "radio")
+
+
 def source_command(seed: int, src: tuple[int, int, int],
-                   video: str = VIDEO_FILE) -> list[str]:
+                   video: str = VIDEO_FILE, audio: str | None = None) -> list[str]:
     width, height, fps = src
     return [
         "node", str(SOURCE),
         f"--width={width}", f"--height={height}", f"--fps={fps}",
         f"--seed={seed}",
         f"--video={video}",
+        f"--audio={audio or audio_for(video)}",
     ]
 
 
 def ffmpeg_command(
     stream_key: str, seconds: int, video_port: int, audio_port: int,
-    src: tuple[int, int, int], out: tuple[int, int, int],
+    src: tuple[int, int, int], out: tuple[int, int, int], grain: bool = True,
 ) -> list[str]:
     src_w, src_h, src_fps = src
     out_w, out_h, out_fps = out
@@ -115,7 +143,8 @@ def ffmpeg_command(
     # тогда дублированные кадры отличаются зерном друг от друга и движение
     # остаётся живым, а не залипает одной картинкой.
     filters.append(f"fps={out_fps}")
-    filters.append("noise=alls=5:allf=t")
+    if grain:
+        filters.append("noise=alls=5:allf=t")
     return [
         "ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info",
         # Не даём FFmpeg виснуть вечно на RTMP/tcp: через 20 с без I/O он
@@ -187,7 +216,7 @@ def attempt(
     log(f"Источник готов, порты {video_port}/{audio_port}, "
         f"кадр {src_fps} fps. Запускаю FFmpeg на {seconds // 60} мин.")
     encoder = subprocess.Popen(
-        ffmpeg_command(stream_key, seconds, video_port, audio_port, src, out),
+        ffmpeg_command(stream_key, seconds, video_port, audio_port, src, out, grain_for(video)),
         stdin=subprocess.DEVNULL, cwd=str(ROOT),
     )
     running["encoder"] = encoder
@@ -264,7 +293,8 @@ def handle_signal(signum: int, _frame: object) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Процедурный эфир на YouTube")
-    parser.add_argument("--minutes", type=int, default=348, help="длительность эфира")
+    parser.add_argument("--minutes", type=int, default=300,
+                        help="длительность эфира, по умолчанию 5 часов — длина забега мухи")
     parser.add_argument(
         "--key", default=os.environ.get("YT_STREAM_KEY", "").strip(),
         help="stream key (по умолчанию из YT_STREAM_KEY)",
@@ -302,7 +332,7 @@ def main() -> int:
     print(f"::add-mask::{args.key}", flush=True)
     log(f"Эфир на {minutes} мин. Режим {args.quality}: "
         f"источник {src[0]}x{src[1]}@{src[2]}, эфир {out[0]}x{out[1]}@{out[2]}, "
-        f"картинка {args.video}.")
+        f"картинка {args.video}, звук {audio_for(args.video)}.")
 
     started = time.time()
     if args.started_at:
