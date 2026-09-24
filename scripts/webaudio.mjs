@@ -6,7 +6,8 @@
    страницы нет — есть Node и TCP, куда надо отдавать готовые сэмплы. Поэтому
    здесь живёт маленький движок, который понимает ровно тот набор Web Audio,
    что нужен сцене (см. AudioEngine в muxa.html): осцилляторы с автоматизацией
-   частоты, гейны с огибающей, биквады, буферы шума и микширование в стерео.
+   частоты, гейны с огибающей, биквады, буферы шума, задержку, волновую кривую
+   (сатурация и «бит-краш»), панораму и микширование в стерео.
 
    Как пользоваться:
      const audio = createOfflineAudio(44100);
@@ -80,6 +81,11 @@ class Node {
     this.sr = ctx.sampleRate;
     this.inputs = [];
     this.persistent = false;       // шины микшера: их не убираем никогда
+    this._memoL = new Float32Array(BLOCK);   // посчитанный за этот проход блок
+    this._memoR = new Float32Array(BLOCK);
+    this._blk = -1;
+    this._blkN = 0;
+    this._gone = false;            // уже вычтен из счётчика узлов
   }
 
   connect(target) {
@@ -97,8 +103,33 @@ class Node {
       n.sweep();
       if (n.finished()) {
         this.inputs.splice(i, 1);
-        this.ctx._alive--;
+        // Один узел может питать несколько выходов (сухой путь и посыл), и
+        // тогда его вычитают из графа дважды. Считаем только один раз.
+        if (!n._gone) { n._gone = true; this.ctx._alive--; }
       }
+    }
+  }
+
+  /**
+   * Узел, который считает себя по шагам (осциллятор, фильтр, задержка), обязан
+   * отдать один и тот же блок всем своим выходам: второй проход испортил бы и
+   * звук, и счёт узлов. Поэтому такие узлы пишут результат в memo, а наружу
+   * отдают его копию. Узлы без состояния (гейн, панорама, кривая) могут
+   * пересчитываться сколько угодно — им это не нужно.
+   */
+  cached(startSample, n) { return this._blk === startSample && this._blkN >= n; }
+
+  beginBlock(startSample, n) {
+    this._blk = startSample;
+    this._blkN = n;
+    this._memoL.fill(0, 0, n);
+    this._memoR.fill(0, 0, n);
+  }
+
+  emit(startSample, n, outL, outR, offset) {
+    for (let i = 0; i < n; i++) {
+      outL[offset + i] += this._memoL[i];
+      outR[offset + i] += this._memoR[i];
     }
   }
 
@@ -126,14 +157,24 @@ class GainNode extends Node {
 
   pull(startSample, n, outL, outR, offset) {
     if (!this.inputs.length) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
     this._bufL.fill(0, 0, n);
     this._bufR.fill(0, 0, n);
     for (const src of this.inputs) src.pull(startSample, n, this._bufL, this._bufR, 0);
+    // Огибающую берём раз на блок и ведём линейно между его краями. Считать
+    // её на каждый сэмпл — сотни тысяч вызовов в секунду на пустом месте,
+    // а на 128 сэмплах (2.9 мс) разницы не слышно.
+    const g0 = Math.max(0, this.gain.at(startSample / this.sr));
+    const g1 = Math.max(0, this.gain.at((startSample + n) / this.sr));
+    const dg = (g1 - g0) / n;
+    let k = g0;
     for (let i = 0; i < n; i++) {
-      const k = Math.max(0, this.gain.at((startSample + i) / this.sr));
-      outL[offset + i] += this._bufL[i] * k;
-      outR[offset + i] += this._bufR[i] * k;
+      this._memoL[i] = this._bufL[i] * k;
+      this._memoR[i] = this._bufR[i] * k;
+      k += dg;
     }
+    this.emit(startSample, n, outL, outR, offset);
   }
 }
 
@@ -163,17 +204,26 @@ class OscillatorNode extends Node {
 
   pull(startSample, n, outL, outR, offset) {
     if (this._startS < 0) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
+    // Частоту тоже берём раз на блок: слайд от этого остаётся плавным, а
+    // вызовов на порядки меньше.
+    const f0 = Math.max(0, this.frequency.at(startSample / this.sr));
+    const f1 = Math.max(0, this.frequency.at((startSample + n) / this.sr));
+    const dF = (f1 - f0) / n;
+    let f = f0;
     for (let i = 0; i < n; i++) {
       const s = startSample + i;
-      if (s < this._startS) continue;
+      if (s < this._startS) { f += dF; continue; }
       if (this._stopS >= 0 && s >= this._stopS) break;
-      const f = Math.max(0, this.frequency.at(s / this.sr));
       this.phase += f / this.sr;
       if (this.phase >= 1) this.phase -= Math.floor(this.phase);
       const v = this._wave(this.phase);
-      outL[offset + i] += v;
-      outR[offset + i] += v;
+      this._memoL[i] = v;
+      this._memoR[i] = v;
+      f += dF;
     }
+    this.emit(startSample, n, outL, outR, offset);
   }
 }
 
@@ -193,6 +243,8 @@ class BiquadFilterNode extends Node {
 
   pull(startSample, n, outL, outR, offset) {
     if (!this.inputs.length) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
     this._bufL.fill(0, 0, n);
     this._bufR.fill(0, 0, n);
     for (const src of this.inputs) src.pull(startSample, n, this._bufL, this._bufR, 0);
@@ -215,8 +267,8 @@ class BiquadFilterNode extends Node {
     }
 
     const chans = [
-      { in: this._bufL, out: outL, st: this._x[0], yst: this._y[0] },
-      { in: this._bufR, out: outR, st: this._x[1], yst: this._y[1] },
+      { in: this._bufL, out: this._memoL, st: this._x[0], yst: this._y[0] },
+      { in: this._bufR, out: this._memoR, st: this._x[1], yst: this._y[1] },
     ];
     for (let c = 0; c < 2; c++) {
       const { in: src, out, st, yst } = chans[c];
@@ -226,9 +278,135 @@ class BiquadFilterNode extends Node {
           - (a1 / a0) * yst[0] - (a2 / a0) * yst[1];
         st[1] = st[0]; st[0] = x;
         yst[1] = yst[0]; yst[0] = y;
-        out[offset + i] += y;
+        out[i] = y;
       }
     }
+    this.emit(startSample, n, outL, outR, offset);
+  }
+}
+
+/**
+ * Задержка без обратной связи: граф здесь считается «вперёд», поэтому петля
+ * (задержка → гейн → задержка) ушла бы в бесконечную рекурсию. Сцене этого
+ * хватает: пространство она собирает из нескольких отражений подряд.
+ */
+class DelayNode extends Node {
+  constructor(ctx, maxDelay) {
+    super(ctx);
+    this.delayTime = new Param(0.5);
+    this._size = Math.max(2, Math.ceil((maxDelay || 1) * ctx.sampleRate) + 1);
+    this._lineL = new Float32Array(this._size);
+    this._lineR = new Float32Array(this._size);
+    this._write = 0;
+    this._inL = new Float32Array(BLOCK);
+    this._inR = new Float32Array(BLOCK);
+  }
+
+  finished() { return !this.persistent && this.inputs.length === 0; }
+
+  pull(startSample, n, outL, outR, offset) {
+    if (!this.inputs.length) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
+    this._inL.fill(0, 0, n);
+    this._inR.fill(0, 0, n);
+    for (const src of this.inputs) src.pull(startSample, n, this._inL, this._inR, 0);
+    const ms = this.delayTime.at(startSample / this.sr);
+    const back = Math.min(this._size - 1, Math.max(1, Math.round(Math.max(0.001, ms) * this.sr)));
+    for (let i = 0; i < n; i++) {
+      let read = this._write - back;
+      if (read < 0) read += this._size;
+      this._memoL[i] = this._lineL[read];
+      this._memoR[i] = this._lineR[read];
+      this._lineL[this._write] = this._inL[i];
+      this._lineR[this._write] = this._inR[i];
+      this._write = (this._write + 1) % this._size;
+    }
+    this.emit(startSample, n, outL, outR, offset);
+  }
+}
+
+/** Волновая кривая: мягкий клип, ступени «бит-краша», любая окраска. */
+class WaveShaperNode extends Node {
+  constructor(ctx) {
+    super(ctx);
+    this.curve = null;
+    this._inL = new Float32Array(BLOCK);
+    this._inR = new Float32Array(BLOCK);
+  }
+
+  finished() { return !this.persistent && this.inputs.length === 0; }
+
+  pull(startSample, n, outL, outR, offset) {
+    if (!this.inputs.length) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
+    this._inL.fill(0, 0, n);
+    this._inR.fill(0, 0, n);
+    for (const src of this.inputs) src.pull(startSample, n, this._inL, this._inR, 0);
+    const c = this.curve;
+    if (!c || c.length < 2) {
+      for (let i = 0; i < n; i++) {
+        this._memoL[i] = this._inL[i];
+        this._memoR[i] = this._inR[i];
+      }
+      this.emit(startSample, n, outL, outR, offset);
+      return;
+    }
+    const half = (c.length - 1) / 2;
+    const top = c.length - 1;
+    for (let i = 0; i < n; i++) {
+      let k = this._inL[i];
+      k = (k < -1 ? -1 : k > 1 ? 1 : k) * half + half;
+      const k0 = Math.floor(k), k1 = k0 < top ? k0 + 1 : k0;
+      this._memoL[i] = c[k0] + (c[k1] - c[k0]) * (k - k0);
+      let j = this._inR[i];
+      j = (j < -1 ? -1 : j > 1 ? 1 : j) * half + half;
+      const j0 = Math.floor(j), j1 = j0 < top ? j0 + 1 : j0;
+      this._memoR[i] = c[j0] + (c[j1] - c[j0]) * (j - j0);
+    }
+    this.emit(startSample, n, outL, outR, offset);
+  }
+}
+
+/**
+ * Панорама по правилу Web Audio для стерео-входа: на центре сигнал проходит
+ * как есть, к краю перетекает в одно ухо. Формулы из спеки — чтобы в браузере
+ * и в эфире звучало одинаково.
+ */
+class StereoPannerNode extends Node {
+  constructor(ctx) {
+    super(ctx);
+    this.pan = new Param(0);
+    this._inL = new Float32Array(BLOCK);
+    this._inR = new Float32Array(BLOCK);
+  }
+
+  finished() { return !this.persistent && this.inputs.length === 0; }
+
+  pull(startSample, n, outL, outR, offset) {
+    if (!this.inputs.length) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
+    this._inL.fill(0, 0, n);
+    this._inR.fill(0, 0, n);
+    for (const src of this.inputs) src.pull(startSample, n, this._inL, this._inR, 0);
+    // Панорама за блок постоянна, а тригонометрию считаем один раз: раньше
+    // и значение, и синус с косинусом брались на каждый сэмпл.
+    const p = Math.min(1, Math.max(-1, this.pan.at(startSample / this.sr)));
+    const x = (p <= 0 ? (p + 1) : p) * Math.PI * 0.5;
+    const cs = Math.cos(x), sn = Math.sin(x);
+    for (let i = 0; i < n; i++) {
+      const l = this._inL[i], r = this._inR[i];
+      if (p <= 0) {
+        this._memoL[i] = l + r * cs;
+        this._memoR[i] = r * sn;
+      } else {
+        this._memoL[i] = l * cs;
+        this._memoR[i] = r + l * sn;
+      }
+    }
+    this.emit(startSample, n, outL, outR, offset);
   }
 }
 
@@ -248,15 +426,18 @@ class BufferSourceNode extends Node {
 
   pull(startSample, n, outL, outR, offset) {
     if (!this.buffer || this._startS < 0) return;
+    if (this.cached(startSample, n)) { this.emit(startSample, n, outL, outR, offset); return; }
+    this.beginBlock(startSample, n);
     const data = this.buffer.getChannelData(0);
     for (let i = 0; i < n; i++) {
       const pos = startSample + i - this._startS;
       if (pos < 0) continue;
       if (pos >= data.length) break;
       const v = data[pos];
-      outL[offset + i] += v;
-      outR[offset + i] += v;
+      this._memoL[i] = v;
+      this._memoR[i] = v;
     }
+    this.emit(startSample, n, outL, outR, offset);
   }
 }
 
@@ -292,6 +473,9 @@ export function createOfflineAudio(sampleRate) {
     createOscillator() { return this._add(new OscillatorNode(this)); }
     createBiquadFilter() { return this._add(new BiquadFilterNode(this)); }
     createBufferSource() { return this._add(new BufferSourceNode(this)); }
+    createDelay(maxDelay) { return this._add(new DelayNode(this, maxDelay)); }
+    createWaveShaper() { return this._add(new WaveShaperNode(this)); }
+    createStereoPanner() { return this._add(new StereoPannerNode(this)); }
 
     createBuffer(channels, length, sampleRate) {
       const data = [];

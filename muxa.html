@@ -195,6 +195,10 @@ function hasInfiniteAmmo() { return player.infiniteAmmoUntil > now(); }
 // ================================================================
 // ============ ЗВУК (процедурный, без внешних файлов) ===========
 // ================================================================
+// Звук собран из слоёв, как в настоящей студии: у каждого события несколько
+// голосов (тело, транзиент, хвост), у каждого голоса — своя огибающая, фильтр,
+// панорама и посыл в пространство. Сверху мастер-цепочка с мягким клипом,
+// а музыка — генеративный грув: бочка, хэты, бас, арпеджио и пелена по биому.
 const AudioEngine = (() => {
   let ctx = null, master = null, musicGain = null, sfxGain = null;
   let enabled = false;
@@ -202,6 +206,8 @@ const AudioEngine = (() => {
   let musicTimer = null;
   let biomeForMusic = -1;
   let lastComboSound = 0;
+  let revSend = null, whiteBuf = null, pinkBuf = null;
+  let step = 0;
 
   const SCALES = [
     [261.63, 293.66, 329.63, 392.00, 440.00],  // ЛУГ — светлая пентатоника
@@ -212,65 +218,242 @@ const AudioEngine = (() => {
     [174.61, 196.00, 207.65, 246.94, 261.63],  // НОЧЬ — низкая, зловещая
   ];
 
+  // Грув биома: темп, плотность хэтов и арпеджио, срез пелены, рисунок бочки.
+  // Раньше на все биомы был один таймер с одной нотой — теперь у каждого свой.
+  const GROOVE = [
+    { bpm: 104, hat: 0.30, arp: 0.32, cut: 2600, kick: [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0] }, // ЛУГ
+    { bpm: 92,  hat: 0.20, arp: 0.22, cut: 1500, kick: [1,0,0,0,0,0,1,0,1,0,0,0,0,0,1,0] }, // ПУСТЫНЯ
+    { bpm: 124, hat: 0.42, arp: 0.44, cut: 3800, kick: [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0] }, // ЛЬДЫ
+    { bpm: 140, hat: 0.46, arp: 0.40, cut: 1300, kick: [1,0,0,0,1,0,1,0,1,0,0,0,1,0,1,0] }, // ВУЛКАН
+    { bpm: 112, hat: 0.32, arp: 0.36, cut: 2100, kick: [1,0,0,0,0,0,1,0,1,0,0,0,0,0,1,0] }, // ЛЕС
+    { bpm: 86,  hat: 0.18, arp: 0.24, cut: 900,  kick: [1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0] }, // НОЧЬ
+  ];
+
+  // ── кривые для сатурации ──────────────────────────────────────────
+  function curve(fn) {
+    const n = 1024, c = new Float32Array(n);
+    for (let i = 0; i < n; i++) c[i] = fn((i / (n - 1)) * 2 - 1);
+    return c;
+  }
+  const shapes = {
+    // Мягкий клип мастера: до 0.7 почти прямая, выше — плавно в потолок.
+    // Кривая без «подъёма»: уровень задаёт громкость мастера, а не кривая.
+    glue: curve(x => Math.tanh(x)),
+    grit: curve(x => Math.round(x * 6) / 6),                 // ступени — грязь урона
+    bite: curve(x => Math.tanh(x * 5) / Math.tanh(5)),       // жёстче — для смерти
+  };
+
   function init() {
     if (ctx) return;
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
-      master = ctx.createGain(); master.gain.value = 0.85; master.connect(ctx.destination);
-      // Фоновая музыка шла на 0.16 при громкости нот 0.05 — рядом с эффектами
-      // её не было слышно совсем. Подняли шину, не трогая баланс: дрон и ноты
-      // по-прежнему 1:1, теперь их просто слышно.
-      musicGain = ctx.createGain(); musicGain.gain.value = 0.5; musicGain.connect(master);
+
+      // Мастер: мягкий клип вместо «цифрового» предела. Поверх него в эфире
+      // стоит ещё ограничитель источника, так что здесь только плотность.
+      // 0.1 подобран по замеру: свой микс пикует около 0.2, а источник в эфире
+      // умножает его на 5 и мягко ограничивает на 0.75 — то есть касается
+      // только самых громких ударов, не размазывая их.
+      const glue = ctx.createWaveShaper(); glue.curve = shapes.glue;
+      master = ctx.createGain(); master.gain.value = 0.1;
+      master.connect(glue); glue.connect(ctx.destination);
+
+      // Пелена (подложка и арпеджио) — отдельная шина: её уступает бочке,
+      // отсюда берётся кач.
+      musicGain = ctx.createGain(); musicGain.gain.value = 0.5;
+      const musicCut = ctx.createBiquadFilter();
+      musicCut.type = 'lowpass'; musicCut.frequency.value = 4000; musicCut.Q.value = 0.8;
+      musicGain.connect(musicCut); musicCut.connect(master);
+
       sfxGain = ctx.createGain(); sfxGain.gain.value = 1; sfxGain.connect(master);
+
+      // Пространство: четыре отражения подряд, без обратной связи — петлю
+      // офлайн-движок не переживёт, а так его понимают и браузер, и эфир.
+      revSend = ctx.createGain(); revSend.gain.value = 0.5;
+      const revCut = ctx.createBiquadFilter();
+      revCut.type = 'lowpass'; revCut.frequency.value = 3000;
+      revSend.connect(revCut); revCut.connect(master);
+      for (const [ms, lvl, pan] of [[37, 0.5, -0.6], [53, 0.42, 0.5], [79, 0.3, -0.3], [127, 0.2, 0.65]]) {
+        const d = ctx.createDelay(1);
+        d.delayTime.value = ms / 1000;
+        const g = ctx.createGain(); g.gain.value = lvl;
+        const p = ctx.createStereoPanner(); p.pan.value = pan;
+        revCut.connect(d); d.connect(g); g.connect(p); p.connect(master);
+        if (ctx.__persistent) { ctx.__persistent(d); ctx.__persistent(g); ctx.__persistent(p); }
+      }
+
+      // Шум — один буфер на всю сессию: щелчки, удары и шипение берут его.
+      // Раньше под каждый хлопок создавался свой буфер и мусорил в куче.
+      const n = Math.floor(ctx.sampleRate * 0.5);
+      whiteBuf = ctx.createBuffer(1, n, ctx.sampleRate);
+      pinkBuf = ctx.createBuffer(1, n, ctx.sampleRate);
+      const w = whiteBuf.getChannelData(0), pk = pinkBuf.getChannelData(0);
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < n; i++) {
+        const v = Math.random() * 2 - 1;
+        w[i] = v;
+        b0 = 0.99765 * b0 + v * 0.0990460;
+        b1 = 0.96300 * b1 + v * 0.2965164;
+        b2 = 0.57000 * b2 + v * 1.0526913;
+        pk[i] = (b0 + b1 + b2 + v * 0.1848) * 0.35;
+      }
+
       // Это шины микшера: звуки приходят и уходят, а шины остаются. Офлайн-движку
       // в эфире нужно знать, что их нельзя убирать как отработавшие. В браузере
       // такого метода нет — и не надо.
       if (ctx.__persistent) {
-        ctx.__persistent(master);
-        ctx.__persistent(musicGain);
-        ctx.__persistent(sfxGain);
+        for (const node of [master, glue, musicGain, musicCut, sfxGain, revSend, revCut]) {
+          ctx.__persistent(node);
+        }
       }
     } catch (e) { ctx = null; }
   }
 
-  function tone(freq, dur, type, peak, slideTo) {
+  // ── голоса ────────────────────────────────────────────────────────
+  /** Слой: осциллятор с огибающей, фильтром, панорамой и посылом в пространство. */
+  function layer(o) {
     if (!ctx || !enabled) return;
-    const t0 = ctx.currentTime;
+    const t0 = o.t || ctx.currentTime;
+    const dur = o.dur;
     const osc = ctx.createOscillator();
+    osc.type = o.type || 'sine';
+    osc.frequency.setValueAtTime(Math.max(20, o.f0), t0);
+    if (o.f1) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.f1), t0 + (o.slide || dur));
+    let tail = osc;
+    if (o.filter) {
+      const f = ctx.createBiquadFilter();
+      f.type = o.filter;
+      f.frequency.setValueAtTime(o.ff || 1200, t0);
+      if (o.ff2) f.frequency.exponentialRampToValueAtTime(Math.max(40, o.ff2), t0 + dur);
+      f.Q.value = o.q || 1;
+      osc.connect(f); tail = f;
+    }
     const g = ctx.createGain();
-    osc.type = type || 'sine';
-    osc.frequency.setValueAtTime(Math.max(20, freq), t0);
-    if (slideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+    const peak = Math.max(0.0002, o.peak || 0.12);
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(Math.max(0.001, peak || 0.25), t0 + 0.012);
+    g.gain.exponentialRampToValueAtTime(peak, t0 + (o.attack || 0.006));
+    if (o.hold) g.gain.setValueAtTime(peak, t0 + o.hold);
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    osc.connect(g); g.connect(sfxGain);
-    osc.start(t0); osc.stop(t0 + dur + 0.03);
+    tail.connect(g);
+    let out = g;
+    if (o.drive) {
+      const s = ctx.createWaveShaper(); s.curve = shapes[o.drive];
+      g.connect(s); out = s;
+    }
+    if (o.pan) {
+      const p = ctx.createStereoPanner(); p.pan.value = o.pan;
+      out.connect(p); out = p;
+    }
+    out.connect(o.dest || sfxGain);
+    if (o.rev) {
+      const s = ctx.createGain(); s.gain.value = o.rev;
+      out.connect(s); s.connect(revSend);
+    }
+    osc.start(t0); osc.stop(t0 + dur + 0.06);
   }
 
-  function noiseBurst(dur, peak, filterFreq, type) {
+  /** Шумовой слой: щелчок, удар, шипение, свист. */
+  function spray(o) {
     if (!ctx || !enabled) return;
-    const t0 = ctx.currentTime;
-    const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
-    const buffer = ctx.createBuffer(1, n, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
-    const src = ctx.createBufferSource(); src.buffer = buffer;
-    const filt = ctx.createBiquadFilter();
-    filt.type = type || 'bandpass';
-    filt.frequency.value = filterFreq || 1200;
+    const t0 = o.t || ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = o.pink ? pinkBuf : whiteBuf;
+    let tail = src;
+    if (o.filter) {
+      const f = ctx.createBiquadFilter();
+      f.type = o.filter;
+      f.frequency.setValueAtTime(o.ff || 2000, t0);
+      if (o.ff2) f.frequency.exponentialRampToValueAtTime(Math.max(40, o.ff2), t0 + o.dur);
+      f.Q.value = o.q || 1;
+      src.connect(f); tail = f;
+    }
     const g = ctx.createGain();
-    g.gain.setValueAtTime(peak || 0.25, t0);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    src.connect(filt); filt.connect(g); g.connect(sfxGain);
+    g.gain.setValueAtTime(Math.max(0.0002, o.peak || 0.15), t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
+    tail.connect(g);
+    let out = g;
+    if (o.pan) {
+      const p = ctx.createStereoPanner(); p.pan.value = o.pan;
+      g.connect(p); out = p;
+    }
+    out.connect(o.dest || sfxGain);
+    if (o.rev) {
+      const s = ctx.createGain(); s.gain.value = o.rev;
+      out.connect(s); s.connect(revSend);
+    }
     src.start(t0);
+  }
+
+  // ── ритм-секция ───────────────────────────────────────────────────
+  function kick(t0) {
+    layer({ t: t0, type: 'sine', f0: 120, f1: 38, slide: 0.09, dur: 0.34, peak: 0.36, attack: 0.004, hold: 0.02 });
+    spray({ t: t0, dur: 0.014, peak: 0.14, filter: 'highpass', ff: 3000 });
+  }
+
+  function hat(t0, pan, open) {
+    spray({ t: t0, dur: open ? 0.17 : 0.05, peak: open ? 0.2 : 0.16,
+            filter: 'highpass', ff: 7000, pan });
+  }
+
+  // Боковой канал: пелена коротко уступает бочке — появляется кач.
+  function pump(t0) {
+    musicGain.gain.setTargetAtTime(0.3, t0, 0.008);
+    musicGain.gain.setTargetAtTime(0.5, t0 + 0.05, 0.09);
+  }
+
+  function bassNote(t0, f) {
+    layer({ t: t0, f0: f, dur: 0.26, type: 'sawtooth', peak: 0.36, dest: musicGain,
+            filter: 'lowpass', ff: 260, q: 6 });
+    layer({ t: t0, f0: f / 2, dur: 0.28, type: 'sine', peak: 0.36, dest: musicGain });
+  }
+
+  function arpNote(t0, f, pan) {
+    layer({ t: t0, f0: f, dur: 0.18, type: 'triangle', peak: 0.24, pan, dest: musicGain, rev: 0.4 });
+    layer({ t: t0, f0: f * 2, dur: 0.11, type: 'sine', peak: 0.09, pan, dest: musicGain, rev: 0.3 });
+  }
+
+  /** Пелена на такт: три расстроенных пилы под низким срезом. */
+  function pad(t0, root, dur, cut) {
+    let i = 0;
+    for (const [mul, pan] of [[1, -0.5], [1, 0.5], [2, 0]]) {
+      const f = root * mul * (i === 0 ? 0.997 : i === 1 ? 1.004 : 1);
+      layer({ t: t0, f0: f, dur, type: 'sawtooth', peak: 0.3, attack: dur * 0.2, hold: dur * 0.65,
+              pan, dest: musicGain, filter: 'lowpass', ff: cut, q: 1.4, rev: 0.5 });
+      i++;
+    }
+  }
+
+  function scheduleStep() {
+    if (!enabled || !ctx) return;
+    const bi = ((biomeForMusic % GROOVE.length) + GROOVE.length) % GROOVE.length;
+    const g = GROOVE[bi];
+    const scale = SCALES[bi] || SCALES[0];
+    const fear = clamp(Brain.survival.fear, 0, 1);
+    const t0 = ctx.currentTime + 0.005;
+    const s = step & 15;
+    step++;
+
+    if (g.kick[s] || (fear > 0.55 && s % 4 === 2)) { kick(t0); pump(t0); }
+    if (Math.random() < g.hat + fear * 0.12) hat(t0, (s & 1) ? 0.3 : -0.3, s === 14);
+    if (s % 8 === 0) bassNote(t0, scale[0] / 2);
+    if (Math.random() < g.arp + fear * 0.1) {
+      const n = scale[Math.floor(Math.random() * scale.length)] * (Math.random() < 0.25 ? 4 : 2);
+      arpNote(t0, n, (s & 2) ? 0.4 : -0.4);
+    }
+    if (s === 0) {
+      const bar = (60 / g.bpm) * 4;
+      pad(t0, scale[0] / 2, bar * 0.98, g.cut * (1 + fear * 0.8));
+      // Раз в такт — высокий звон, чтобы такт не сливался с соседним.
+      layer({ t: t0, f0: scale[4] * 2, dur: 0.9, type: 'sine', peak: 0.09, pan: 0.5,
+              dest: musicGain, rev: 0.6, attack: 0.02 });
+    }
+    if (droneFilter) droneFilter.frequency.setTargetAtTime(300 + fear * 1100, ctx.currentTime, 0.35);
   }
 
   function ensureDrone() {
     if (droneOsc || !ctx) return;
     droneOsc = ctx.createOscillator(); droneOsc.type = 'sine';
     droneFilter = ctx.createBiquadFilter(); droneFilter.type = 'lowpass'; droneFilter.frequency.value = 500;
-    droneGain = ctx.createGain(); droneGain.gain.value = 0.05;
+    droneGain = ctx.createGain(); droneGain.gain.value = 0.08;
     droneOsc.connect(droneFilter); droneFilter.connect(droneGain); droneGain.connect(musicGain);
     droneOsc.frequency.value = SCALES[0][0] / 2;
     if (ctx.__persistent) ctx.__persistent(droneGain);   // тоже шина, а не разовый звук
@@ -279,16 +462,9 @@ const AudioEngine = (() => {
 
   function scheduleMusic() {
     clearInterval(musicTimer);
-    musicTimer = setInterval(() => {
-      if (!enabled || !ctx) return;
-      const scale = SCALES[currentBiome % SCALES.length] || SCALES[0];
-      const danger = Brain.survival.fear;
-      if (Math.random() < 0.82) {
-        const note = scale[Math.floor(Math.random() * scale.length)] * (Math.random() < 0.12 ? 2 : 1);
-        tone(note, 0.55 + Math.random() * 0.3, 'triangle', 0.05 + danger * 0.03, note * 0.998);
-      }
-      if (droneFilter) droneFilter.frequency.setTargetAtTime(400 + danger * 900, ctx.currentTime, 0.4);
-    }, 420 - Brain.survival.fear * 160);
+    const bi = ((biomeForMusic % GROOVE.length) + GROOVE.length) % GROOVE.length;
+    step = 0;
+    musicTimer = setInterval(scheduleStep, (60 / GROOVE[bi].bpm / 4) * 1000);
   }
 
   function onBiomeChanged() {
@@ -296,10 +472,14 @@ const AudioEngine = (() => {
     if (biomeForMusic === currentBiome) return;
     biomeForMusic = currentBiome;
     ensureDrone();
-    const scale = SCALES[currentBiome % SCALES.length] || SCALES[0];
-    droneOsc.frequency.exponentialRampToValueAtTime(scale[0] / 2, ctx.currentTime + 1.4);
+    const bi = ((biomeForMusic % GROOVE.length) + GROOVE.length) % GROOVE.length;
+    const scale = SCALES[bi] || SCALES[0];
+    droneOsc.frequency.exponentialRampToValueAtTime(scale[0] / 2, ctx.currentTime + 1.6);
     scheduleMusic();
-    tone(scale[0], 0.5, 'sine', 0.12, scale[2]);
+    // Переход: восходящий шум и колокол — слышно, что мир сменился.
+    const t0 = ctx.currentTime;
+    spray({ t: t0, dur: 0.9, peak: 0.1, filter: 'bandpass', ff: 400, ff2: 4200, q: 2, rev: 0.6 });
+    layer({ t: t0 + 0.1, f0: scale[0], f1: scale[2], slide: 0.5, dur: 0.9, type: 'triangle', peak: 0.1, rev: 0.6 });
   }
 
   function resume() {
@@ -322,29 +502,83 @@ const AudioEngine = (() => {
   return {
     resume, toggle,
     get enabled() { return enabled; },
-    jump() { tone(420, 0.11, 'square', 0.18, 720); },
-    doubleJump() { tone(600, 0.13, 'square', 0.18, 980); },
-    shoot() { tone(950, 0.06, 'sawtooth', 0.12, 280); },
-    hit() { noiseBurst(0.07, 0.18, 1800); },
-    stomp() { tone(190, 0.09, 'square', 0.25, 55); },
-    sword() { noiseBurst(0.06, 0.2, 3200, 'highpass'); },
+    // Прыжок: тело вверх, транзиент отталкивания, немного воздуха в сторону.
+    jump() {
+      layer({ f0: 300, f1: 760, slide: 0.1, dur: 0.16, type: 'triangle', peak: 0.22,
+              filter: 'lowpass', ff: 900, ff2: 2600, pan: -0.15, rev: 0.15 });
+      spray({ dur: 0.05, peak: 0.08, filter: 'highpass', ff: 2600, pan: -0.2 });
+    },
+    doubleJump() {
+      layer({ f0: 420, f1: 1180, slide: 0.13, dur: 0.22, type: 'sawtooth', peak: 0.18,
+              filter: 'lowpass', ff: 1200, ff2: 3600, pan: 0.2, rev: 0.25 });
+      layer({ f0: 628, f1: 1770, slide: 0.13, dur: 0.2, type: 'triangle', peak: 0.12, pan: 0.25 });
+      spray({ dur: 0.08, peak: 0.09, filter: 'highpass', ff: 3200, pan: 0.3, rev: 0.2 });
+    },
+    // Приземление: тело получает вес. Чем выше падал, тем плотнее удар.
+    land(power) {
+      const p = clamp(power || 0.5, 0.2, 1);
+      layer({ f0: 150, f1: 46, slide: 0.07, dur: 0.16, type: 'sine', peak: 0.3 * p, hold: 0.01 });
+      spray({ dur: 0.05, peak: 0.1 * p, filter: 'lowpass', ff: 900, ff2: 220, rev: 0.15 });
+    },
+    // Выстрел: спуск по частоте, транзиент и хвост в пространстве.
+    shoot() {
+      layer({ f0: 1600, f1: 190, slide: 0.11, dur: 0.16, type: 'sawtooth', peak: 0.22,
+              filter: 'bandpass', ff: 1800, ff2: 700, q: 4, pan: -0.1, rev: 0.45 });
+      layer({ f0: 3200, f1: 900, slide: 0.05, dur: 0.07, type: 'square', peak: 0.09, pan: 0.1 });
+      spray({ dur: 0.03, peak: 0.07, filter: 'highpass', ff: 4500 });
+    },
+    hit() {
+      spray({ dur: 0.09, peak: 0.2, filter: 'bandpass', ff: 2400, q: 5, rev: 0.2 });
+      layer({ f0: 900, f1: 380, slide: 0.06, dur: 0.09, type: 'triangle', peak: 0.1 });
+    },
+    stomp() {
+      layer({ f0: 190, f1: 40, slide: 0.1, dur: 0.3, type: 'sine', peak: 0.5, hold: 0.02 });
+      spray({ dur: 0.06, peak: 0.16, filter: 'lowpass', ff: 1400, ff2: 300, rev: 0.15 });
+    },
+    sword() {
+      spray({ dur: 0.11, peak: 0.18, filter: 'highpass', ff: 900, ff2: 7000, rev: 0.3 });
+      layer({ f0: 2600, f1: 1800, slide: 0.09, dur: 0.18, type: 'triangle', peak: 0.07,
+              filter: 'bandpass', ff: 2600, q: 9, rev: 0.35 });
+    },
     kill(type) {
-      tone(type === 'flyer' ? 540 : 260, 0.2, 'triangle', 0.22, type === 'flyer' ? 180 : 85);
-      noiseBurst(0.05, 0.12, 2400);
+      const fly = type === 'flyer';
+      layer({ f0: fly ? 620 : 260, f1: fly ? 150 : 70, slide: 0.2, dur: 0.32, type: 'sawtooth', peak: 0.24,
+              filter: 'lowpass', ff: 2600, ff2: 600, rev: 0.3 });
+      layer({ f0: fly ? 930 : 390, f1: fly ? 220 : 105, slide: 0.2, dur: 0.28, type: 'square', peak: 0.1, pan: 0.25 });
+      spray({ dur: 0.14, peak: 0.18, filter: 'bandpass', ff: 1500, ff2: 500, q: 1.2, rev: 0.3 });
     },
+    // Монетка: колокольчик с расстроенным дублем и искрой сверху.
     coin() {
-      tone(880, 0.07, 'square', 0.14);
-      setTimeout(() => tone(1320, 0.1, 'square', 0.13), 55);
+      const t0 = ctx ? ctx.currentTime : 0;
+      for (const [i, f] of [[0, 1046.5], [1, 1568.0]]) {
+        layer({ t: t0 + i * 0.055, f0: f, dur: i ? 0.22 : 0.1, type: 'sine', peak: 0.16, pan: 0.25, rev: 0.25 });
+        layer({ t: t0 + i * 0.055, f0: f * 1.005, dur: i ? 0.2 : 0.09, type: 'triangle', peak: 0.07, pan: 0.35 });
+      }
+      spray({ dur: 0.05, peak: 0.05, filter: 'highpass', ff: 6000, pan: 0.3, rev: 0.2 });
     },
-    hurt() { tone(150, 0.16, 'sawtooth', 0.24, 55); noiseBurst(0.1, 0.16, 500, 'lowpass'); },
-    death() { tone(320, 0.55, 'sine', 0.26, 45); },
+    hurt() {
+      layer({ f0: 240, f1: 60, slide: 0.18, dur: 0.3, type: 'sawtooth', peak: 0.3, drive: 'grit' });
+      spray({ dur: 0.16, peak: 0.16, filter: 'lowpass', ff: 900, ff2: 240 });
+    },
+    death() {
+      layer({ f0: 380, f1: 42, slide: 0.7, dur: 1.1, type: 'sine', peak: 0.3, rev: 0.6 });
+      layer({ f0: 190, f1: 30, slide: 0.9, dur: 1.3, type: 'triangle', peak: 0.2, drive: 'bite', rev: 0.5 });
+    },
     combo(n) {
       const t = now();
-      if (t - lastComboSound < 80) return;
+      if (t - lastComboSound < 70) return;
       lastComboSound = t;
-      tone(520 + n * 45, 0.09, 'square', 0.16, 760 + n * 45);
+      const f = 520 + Math.min(n, 8) * 60;
+      layer({ f0: f, f1: f * 1.5, slide: 0.07, dur: 0.13, type: 'square', peak: 0.13,
+              pan: (n % 2 ? 0.25 : -0.25), rev: 0.3 });
     },
-    buff() { [0, 1, 2].forEach(i => setTimeout(() => tone(660 + i * 220, 0.12, 'sine', 0.16), i * 70)); },
+    buff() {
+      const t0 = ctx ? ctx.currentTime : 0;
+      for (let i = 0; i < 4; i++) {
+        layer({ t: t0 + i * 0.06, f0: 660 * Math.pow(1.26, i), dur: 0.3, type: 'triangle', peak: 0.12,
+                pan: (i % 2 ? 0.3 : -0.3), rev: 0.35 });
+      }
+    },
     onBiomeChanged
   };
 })();
@@ -1347,6 +1581,7 @@ function update(dt) {
   if (!isFinite(player.x)) player.x = 140;
   if (!isFinite(player.y)) player.y = GROUND_Y - player.h;
 
+  const wasAir = !player.onGround;
   player.onGround = false;
   for (const p of world.platforms) {
     if (player.x + player.w > p.x && player.x < p.x + p.w) {
@@ -1359,6 +1594,11 @@ function update(dt) {
         player.doubleJumpPending = false;
       }
     }
+  }
+  // Приземление слышно: чем быстрее падал, тем плотнее удар. Раньше муха
+  // молча прилипала к земле и прыжки звучали «в пустоте».
+  if (wasAir && player.onGround && prevVy > 4) {
+    AudioEngine.land(clamp(prevVy / 15, 0.2, 1));
   }
 
   // Приподнятая земля — это ещё и стенка. Без этого герой входил в холм боком
