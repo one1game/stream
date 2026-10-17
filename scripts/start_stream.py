@@ -88,8 +88,10 @@ VIDEO_BITRATE = "3000k"
 # этого значения или флагом --video.
 VIDEO_FILE = "newvideo.html"
 
-# GitHub-hosted job живёт максимум 360 минут, выше не поднять.
-MAX_MINUTES = 350
+# GitHub-hosted job живёт максимум 360 минут, выше не поднять. Локально такого
+# предела нет: там эфир может идти сколько нужно (девять часов и дольше).
+IN_ACTIONS = os.environ.get("GITHUB_ACTIONS") == "true"
+MAX_MINUTES = 350 if IN_ACTIONS else 24 * 60
 # Жёсткий предел считается от старта job'а: установка зависимостей и закрытие
 # RTMP тоже занимают время, и в 360 минут они входить не должны.
 JOB_LIMIT_MINUTES = 355
@@ -340,10 +342,16 @@ def main() -> int:
             started = float(args.started_at)
         except ValueError:
             log(f"Не понял старт job'а {args.started_at!r}, считаю от себя.")
-    hard_stop = started + JOB_LIMIT_MINUTES * 60
-    deadline = min(time.time() + minutes * 60, hard_stop)
+    # В Actions дедлайн режет жёсткий предел job'а, локально — только сам эфир.
+    if IN_ACTIONS:
+        hard_stop = started + JOB_LIMIT_MINUTES * 60
+        deadline = min(time.time() + minutes * 60, hard_stop)
+        limit_note = f"жёсткий предел job'а — {JOB_LIMIT_MINUTES} мин от старта"
+    else:
+        deadline = time.time() + minutes * 60
+        limit_note = "локальный запуск, предела job'а нет"
     log(f"Конец эфира в {datetime.fromtimestamp(deadline, timezone.utc):%H:%M:%S} UTC "
-        f"(жёсткий предел job'а — {JOB_LIMIT_MINUTES} мин от старта). "
+        f"({limit_note}). "
         "После этого FFmpeg закроет RTMP, и YouTube завершит трансляцию сам, "
         "если в Studio включён автостоп.")
 
