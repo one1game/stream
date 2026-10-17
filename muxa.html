@@ -229,6 +229,10 @@ const AudioEngine = (() => {
     { bpm: 86,  hat: 0.18, arp: 0.24, cut: 900,  kick: [1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0] }, // НОЧЬ
   ];
 
+  // Ход по тактам — ступени лада. Без него бас и пелена весь эфир держали
+  // одну и ту же ноту, и вместе с пилой это звучало как заевшая труба.
+  const PROGRESSION = [0, 3, 1, 4];
+
   // ── кривые для сатурации ──────────────────────────────────────────
   function curve(fn) {
     const n = 1024, c = new Float32Array(n);
@@ -401,8 +405,10 @@ const AudioEngine = (() => {
   }
 
   function bassNote(t0, f) {
+    // Срез без высокой добротности: на Q 6 резонанс на 260 Гц давал басу
+    // гнусавый «духовой» призвук.
     layer({ t: t0, f0: f, dur: 0.26, type: 'sawtooth', peak: 0.36, dest: musicGain,
-            filter: 'lowpass', ff: 260, q: 6 });
+            filter: 'lowpass', ff: 320, q: 3 });
     layer({ t: t0, f0: f / 2, dur: 0.28, type: 'sine', peak: 0.36, dest: musicGain });
   }
 
@@ -411,14 +417,21 @@ const AudioEngine = (() => {
     layer({ t: t0, f0: f * 2, dur: 0.11, type: 'sine', peak: 0.09, pan, dest: musicGain, rev: 0.3 });
   }
 
-  /** Пелена на такт: три расстроенных пилы под низким срезом. */
+  /**
+   * Пелена на такт: два мягких треугольника и синус сверху, низкий срез.
+   *
+   * Раньше это были три расстроенные ПИЛЫ под резонансным срезом на 2–3.8 кГц
+   * и всегда от одной и той же ноты: пила плюс резонанс — это ровно тембр
+   * духового, а неизменная нота делала из него «трубу, которая тянет весь
+   * эфир». Треугольник с низким срезом читается как подложка, а не как труба.
+   */
   function pad(t0, root, dur, cut) {
-    let i = 0;
-    for (const [mul, pan] of [[1, -0.5], [1, 0.5], [2, 0]]) {
-      const f = root * mul * (i === 0 ? 0.997 : i === 1 ? 1.004 : 1);
-      layer({ t: t0, f0: f, dur, type: 'sawtooth', peak: 0.3, attack: dur * 0.2, hold: dur * 0.65,
-              pan, dest: musicGain, filter: 'lowpass', ff: cut, q: 1.4, rev: 0.5 });
-      i++;
+    const voices = [[1, -0.5, 'triangle', 0.4], [1.5, 0.5, 'triangle', 0.3], [2, 0, 'sine', 0.2]];
+    for (let i = 0; i < voices.length; i++) {
+      const [mul, pan, type, peak] = voices[i];
+      const f = root * mul * (i === 0 ? 0.998 : i === 1 ? 1.003 : 1);
+      layer({ t: t0, f0: f, dur, type, peak, attack: dur * 0.22, hold: dur * 0.6,
+              pan, dest: musicGain, filter: 'lowpass', ff: cut, q: 0.7, rev: 0.5 });
     }
   }
 
@@ -430,21 +443,30 @@ const AudioEngine = (() => {
     const fear = clamp(Brain.survival.fear, 0, 1);
     const t0 = ctx.currentTime + 0.005;
     const s = step & 15;
+    const bar = step >> 4;
     step++;
+    // Гармония ходит по тактам: бас и пелена ведут одну последовательность,
+    // иначе весь эфир висит на одной ноте.
+    const root = (scale[PROGRESSION[bar % PROGRESSION.length]] || scale[0]) / 2;
 
     if (g.kick[s] || (fear > 0.55 && s % 4 === 2)) { kick(t0); pump(t0); }
     if (Math.random() < g.hat + fear * 0.12) hat(t0, (s & 1) ? 0.3 : -0.3, s === 14);
-    if (s % 8 === 0) bassNote(t0, scale[0] / 2);
+    if (s % 8 === 0) bassNote(t0, root);
     if (Math.random() < g.arp + fear * 0.1) {
       const n = scale[Math.floor(Math.random() * scale.length)] * (Math.random() < 0.25 ? 4 : 2);
       arpNote(t0, n, (s & 2) ? 0.4 : -0.4);
     }
     if (s === 0) {
-      const bar = (60 / g.bpm) * 4;
-      pad(t0, scale[0] / 2, bar * 0.98, g.cut * (1 + fear * 0.8));
-      // Раз в такт — высокий звон, чтобы такт не сливался с соседним.
-      layer({ t: t0, f0: scale[4] * 2, dur: 0.9, type: 'sine', peak: 0.09, pan: 0.5,
-              dest: musicGain, rev: 0.6, attack: 0.02 });
+      const barLen = (60 / g.bpm) * 4;
+      pad(t0, root, barLen * 0.98, g.cut * 0.4 * (1 + fear * 0.6));
+      // Подложка ведёт корень текущего такта, а не одну ноту весь эфир.
+      if (droneOsc) droneOsc.frequency.setTargetAtTime(root, t0, 0.35);
+      // Колокол — только на первом такте хода: он отмечает начало фразы,
+      // а не долбит одну ноту каждый такт.
+      if (bar % PROGRESSION.length === 0) {
+        layer({ t: t0, f0: root * 4, dur: 0.9, type: 'sine', peak: 0.08, pan: 0.5,
+                dest: musicGain, rev: 0.6, attack: 0.02 });
+      }
     }
     if (droneFilter) droneFilter.frequency.setTargetAtTime(300 + fear * 1100, ctx.currentTime, 0.35);
   }
@@ -2991,6 +3013,135 @@ function drawHud() {
   grad.addColorStop(1, '#ff9a00');
   g.fillStyle = grad;
   g.fillRect(px + 2, py + 2, Math.max(0, (pw - 4) * hud.progress / 100), ph - 4);
+  g.restore();
+
+  drawBrainPanel();
+}
+
+// ================================================================
+// ============ FLY BRAIN SIMULATION ==============================
+// ================================================================
+// Тренд «агент играет сам» читается, когда видно, что за решениями стоит
+// мозг. Панель показывает не выдуманные цифры, а живую активность: узлы
+// загораются от того, что муха реально видит и делает (враг в кадре,
+// опасность, прыжок, выстрел, удар, смерть). Связи и подписи — часть HUD.
+const BRAIN_POS = [
+  [0.05, 0.18], [0.05, 0.50], [0.05, 0.82],   // сенсоры: зрение, опасность, память
+  [0.34, 0.16], [0.34, 0.50], [0.34, 0.84],   // скрытый слой
+  [0.68, 0.20], [0.68, 0.52], [0.68, 0.84],   // действия
+];
+const BRAIN_WIRES = [
+  [0, 3], [0, 4], [0, 5], [1, 3], [1, 4], [1, 5], [2, 3], [2, 4], [2, 5],
+  [3, 6], [3, 7], [3, 8], [4, 6], [4, 7], [4, 8], [5, 6], [5, 7], [5, 8],
+];
+const BRAIN_TAGS = ['', '', '', '', '', '', 'JUMP', 'SHOOT', 'HIT'];
+const brainPanel = {
+  heat: new Float32Array(9),
+  jumps: 0, kills: 0, deaths: 0,
+};
+
+// Неподвижная часть панели (рамка, подпись, связи, бледные ярлыки) печётся
+// один раз: в кадре остаются только живые узлы и вспыхнувшие связи. Иначе
+// каждые тридцать кадров в секунду Skia заново рисует 18 линий и два текста.
+let brainLayer = null, brainLayerK = 0;
+function brainLayerCanvas(k) {
+  if (brainLayer && brainLayerK === k) return brainLayer;
+  const pw = 300 * k, ph = 138 * k;
+  const cv = document.createElement('canvas');
+  cv.width = Math.ceil(pw); cv.height = Math.ceil(ph);
+  const g = cv.getContext('2d');
+  g.fillStyle = 'rgba(6,10,14,0.58)';
+  g.fillRect(0, 0, pw, ph);
+  g.strokeStyle = 'rgba(124,252,0,0.22)';
+  g.lineWidth = Math.max(1, k);
+  g.strokeRect(0.5, 0.5, pw - 1, ph - 1);
+
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  g.font = `bold ${Math.round(12 * k)}px 'Courier New', monospace`;
+  g.fillStyle = '#7CFC00';
+  g.fillText('FLY BRAIN SIMULATION', 10 * k, 17 * k);
+  g.font = `${Math.round(9 * k)}px 'Courier New', monospace`;
+  g.fillStyle = 'rgba(124,252,0,0.5)';
+  g.fillText('autonomous · live', 10 * k, 29 * k);
+
+  const gx = 12 * k, gy = 40 * k, gw = pw - 24 * k, gh = ph - 52 * k;
+  g.strokeStyle = 'rgba(124,252,0,0.07)';
+  g.lineWidth = Math.max(0.6, 0.6 * k);
+  for (const [a, b] of BRAIN_WIRES) {
+    g.beginPath();
+    g.moveTo(gx + BRAIN_POS[a][0] * gw, gy + BRAIN_POS[a][1] * gh);
+    g.lineTo(gx + BRAIN_POS[b][0] * gw, gy + BRAIN_POS[b][1] * gh);
+    g.stroke();
+  }
+  g.font = `${Math.round(9 * k)}px 'Courier New', monospace`;
+  g.fillStyle = 'rgba(110,150,100,0.45)';
+  for (let i = 0; i < 9; i++) {
+    if (!BRAIN_TAGS[i]) continue;
+    g.fillText(BRAIN_TAGS[i], gx + BRAIN_POS[i][0] * gw + 8 * k, gy + BRAIN_POS[i][1] * gh + 3 * k);
+  }
+  brainLayer = cv;
+  brainLayerK = k;
+  return cv;
+}
+
+function drawBrainPanel() {
+  const g = ctx;
+  const k = W / 1280;
+  const H0 = brainPanel.heat;
+
+  // ── активность ────────────────────────────────────────────────
+  for (let i = 0; i < 9; i++) H0[i] *= 0.93;
+  const senses = Brain.sense;
+  H0[0] = Math.max(H0[0], clamp(senses.enemies.length / 3, 0, 1));
+  H0[1] = Math.max(H0[1], clamp((senses.hazards.length || 0) / 2, 0, 1));
+  H0[2] = Math.max(H0[2], clamp(Brain.survival.fear, 0, 1));
+  if (player.jumps > brainPanel.jumps) { H0[6] = 1; brainPanel.jumps = player.jumps; }
+  if (player.shootCooldown > 0) H0[7] = Math.max(H0[7], 0.85);
+  if (player.attacking) H0[8] = Math.max(H0[8], 0.8);
+  if (player.kills > brainPanel.kills) { H0[8] = 1; H0[0] = 1; brainPanel.kills = player.kills; }
+  if (Brain.deaths > brainPanel.deaths) { H0[2] = 1; brainPanel.deaths = Brain.deaths; }
+  for (let i = 3; i < 6; i++) {
+    H0[i] = Math.max(H0[i] * 0.9, (H0[i - 3] * 0.6 + H0[i + 3] * 0.4));
+  }
+
+  // ── панель ────────────────────────────────────────────────────
+  const pw = 300 * k, ph = 138 * k;
+  const px = 18 * k, py = 240 * k;
+  g.save();
+  g.drawImage(brainLayerCanvas(k), px, py);
+
+  const gx = px + 12 * k, gy = py + 40 * k;
+  const gw = pw - 24 * k, gh = ph - 52 * k;
+  // Бледные связи уже в слое — в кадре только те, что реально горят.
+  for (const [a, b] of BRAIN_WIRES) {
+    const lit = Math.min(1, H0[a] * 0.75 + H0[b] * 0.45);
+    if (lit < 0.12) continue;
+    g.strokeStyle = `rgba(124,252,0,${(lit * 0.34).toFixed(3)})`;
+    g.lineWidth = Math.max(0.6, (0.6 + lit * 1.1) * k);
+    g.beginPath();
+    g.moveTo(gx + BRAIN_POS[a][0] * gw, gy + BRAIN_POS[a][1] * gh);
+    g.lineTo(gx + BRAIN_POS[b][0] * gw, gy + BRAIN_POS[b][1] * gh);
+    g.stroke();
+  }
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  g.font = `${Math.round(9 * k)}px 'Courier New', monospace`;
+  for (let i = 0; i < 9; i++) {
+    const x = gx + BRAIN_POS[i][0] * gw, y = gy + BRAIN_POS[i][1] * gh;
+    const h = H0[i];
+    const r = (2.6 + h * 3.2) * k;
+    if (h > 0.35) {
+      g.fillStyle = `rgba(124,252,0,${(h * 0.16).toFixed(3)})`;
+      g.beginPath(); g.arc(x, y, r * 3, 0, Math.PI * 2); g.fill();
+    }
+    g.fillStyle = h > 0.6 ? '#eaffb0' : h > 0.25 ? '#9ef01a' : 'rgba(88,150,40,0.75)';
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+    if (BRAIN_TAGS[i]) {
+      g.fillStyle = h > 0.3 ? 'rgba(200,255,150,0.9)' : 'rgba(110,150,100,0.45)';
+      g.fillText(BRAIN_TAGS[i], x + 8 * k, y + 3 * k);
+    }
+  }
   g.restore();
 }
 
