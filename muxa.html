@@ -1917,6 +1917,23 @@ function backdropLayer() {
   g.fillStyle = grad; g.fillRect(0, 0, W, H);
   if (biome.name === 'НОЧЬ') drawMoon(W - 180, 140, g);
   else drawSun(W - 180, 140, g);
+
+  // Воздух: большое гало вокруг светила и дымка у горизонта. Оба градиента
+  // лежат в печёном фоне, то есть в кадре стоят ровно ноль. С ними картинка
+  // перестаёт быть плоской заливкой и читается как оптика, а не как спрайты.
+  const sunX = W - 180, sunY = 140;
+  const warm = biome.name === 'НОЧЬ' ? '190,215,255' : '255,246,200';
+  const halo = g.createRadialGradient(sunX, sunY, 50, sunX, sunY, Math.max(W, H) * 0.6);
+  halo.addColorStop(0, `rgba(${warm},0.16)`);
+  halo.addColorStop(0.45, `rgba(${warm},0.055)`);
+  halo.addColorStop(1, `rgba(${warm},0)`);
+  g.fillStyle = halo; g.fillRect(0, 0, W, H);
+  const hazeTop = H * 0.52;
+  const haze = g.createLinearGradient(0, hazeTop, 0, GROUND_Y);
+  haze.addColorStop(0, `rgba(${warm},0)`);
+  haze.addColorStop(1, `rgba(${warm},0.11)`);
+  g.fillStyle = haze; g.fillRect(0, hazeTop, W, GROUND_Y - hazeTop);
+
   backdropBiome = currentBiome;
   return backdrop;
 }
@@ -1982,8 +1999,10 @@ function drawVignette(g) {
   ];
   for (const [x, y, w, h, gx0, gy0, gx1, gy1] of bands) {
     const grad = g.createLinearGradient(gx0, gy0, gx1, gy1);
-    grad.addColorStop(0, 'rgba(0,0,0,0.34)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    // Виньетка чуть холодная, а не чёрная: край кадра уходит в синеву, как у
+    // объектива, и картинка перестаёт выглядеть просто затемнённой.
+    grad.addColorStop(0, 'rgba(3,10,18,0.36)');
+    grad.addColorStop(1, 'rgba(3,10,18,0)');
     g.fillStyle = grad;
     g.fillRect(x, y, w, h);
   }
@@ -3016,6 +3035,7 @@ function drawHud() {
   g.restore();
 
   drawBrainPanel();
+  drawFilmOverlay();
 }
 
 // ================================================================
@@ -3143,6 +3163,96 @@ function drawBrainPanel() {
     }
   }
   g.restore();
+}
+
+// ================================================================
+// ============ ОПТИКА КАДРА (поэзия технологии) ==================
+// ================================================================
+// Тонкая рамка-видоискатель, медленная строка развёртки, пылинки в свете и
+// подпись-монолог машины. Всё нарисовано линиями и точками, без полноэкранных
+// наложений: Skia платит за каждый пиксель, а тут в кадре их сотни.
+const MOTES = [];
+for (let i = 0; i < 16; i++) {
+  MOTES.push({
+    x: (i * 0.6180339887) % 1,
+    y: 0.10 + ((i * 0.37) % 1) * 0.66,
+    vx: 0.003 + ((i * 0.13) % 1) * 0.007,
+    r: 0.9 + ((i * 0.7) % 1) * 1.8,
+    ph: i * 1.7,
+  });
+}
+// Фразы идут по кругу: это не подсказки игроку, а мысли того, кто играет.
+const CAPTIONS = [
+  'она не знает, что её смотрят',
+  'страх — это просто ещё один вход',
+  'память о смерти живёт дольше жизни',
+  'каждое решение — всего лишь порог',
+  'пять часов одного и того же я',
+  'она учится на том, что её ранит',
+  'между кадром и кадром целая жизнь',
+  'чем ближе цель, тем громче тишина',
+];
+const CAPTION_MS = 32000;
+
+function drawFilmOverlay() {
+  const g = ctx;
+  const k = W / 1280;
+  const t = now() * 0.001;
+
+  // ── пылинки в свете ───────────────────────────────────────────
+  g.fillStyle = 'rgba(222,243,255,0.15)';
+  for (const m of MOTES) {
+    const x = ((((m.x + t * m.vx) % 1) + 1) % 1) * W;
+    const y = (m.y + Math.sin(t * 0.4 + m.ph) * 0.012) * H;
+    g.beginPath(); g.arc(x, y, m.r * k, 0, Math.PI * 2); g.fill();
+  }
+
+  // ── строка развёртки ──────────────────────────────────────────
+  const period = 11000;
+  const sy = ((now() % period) / period) * H;
+  g.fillStyle = 'rgba(200,240,255,0.04)';
+  g.fillRect(0, sy - 7 * k, W, 7 * k);
+  g.fillStyle = 'rgba(215,245,255,0.09)';
+  g.fillRect(0, sy, W, Math.max(1, 1.2 * k));
+
+  // ── видоискатель: уголки и редкие риски по краям ──────────────
+  const inset = 12 * k, len = 26 * k;
+  g.strokeStyle = 'rgba(170,235,255,0.26)';
+  g.lineWidth = Math.max(1, 1.1 * k);
+  g.beginPath();
+  g.moveTo(inset, inset + len); g.lineTo(inset, inset); g.lineTo(inset + len, inset);
+  g.moveTo(W - inset - len, inset); g.lineTo(W - inset, inset); g.lineTo(W - inset, inset + len);
+  g.moveTo(inset, H - inset - len); g.lineTo(inset, H - inset); g.lineTo(inset + len, H - inset);
+  g.moveTo(W - inset - len, H - inset); g.lineTo(W - inset, H - inset); g.lineTo(W - inset, H - inset - len);
+  g.stroke();
+  g.strokeStyle = 'rgba(170,235,255,0.14)';
+  g.beginPath();
+  for (let i = 1; i <= 3; i++) {
+    const ty = H * (0.22 + i * 0.18);
+    g.moveTo(inset, ty); g.lineTo(inset + 5 * k, ty);
+    g.moveTo(W - inset, ty); g.lineTo(W - inset - 5 * k, ty);
+  }
+  g.stroke();
+
+  // ── подпись: печатается, держится, растворяется ───────────────
+  if (finished) return;
+  const slot = Math.floor(now() / CAPTION_MS);
+  const local = now() - slot * CAPTION_MS;
+  const line = CAPTIONS[slot % CAPTIONS.length];
+  const shown = Math.min(line.length, Math.floor(local / 60));
+  const fade = Math.min(1, local / 700) * Math.min(1, Math.max(0, (CAPTION_MS - local) / 2500));
+  if (fade <= 0.03 || !shown) return;
+  g.textAlign = 'right';
+  g.textBaseline = 'alphabetic';
+  g.font = `italic ${Math.round(14 * k)}px 'Courier New', monospace`;
+  g.strokeStyle = 'rgba(200,235,255,0.12)';
+  g.lineWidth = Math.max(1, k);
+  g.beginPath();
+  g.moveTo(W - inset - 64 * k, H - 58 * k);
+  g.lineTo(W - inset, H - 58 * k);
+  g.stroke();
+  g.fillStyle = `rgba(206,236,255,${(fade * 0.55).toFixed(3)})`;
+  g.fillText(line.slice(0, shown), W - inset, H - 40 * k);
 }
 
 function drawStreamerCam() {
