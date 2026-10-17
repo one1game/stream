@@ -133,12 +133,9 @@ const player = {
 
 // Дирижабль — вывеска канала, и он должен читаться всегда, а не проплывать
 // раз в минуту где-то за краем. Держим его в верхней середине неба, выше
-// панелей мозга и чата и правее колонки HUD: он медленно ходит туда-обратно
+// панели мозга и правее колонки HUD: он медленно ходит туда-обратно
 // и не прячется ни за одним элементом.
-const blimp = {
-  x: 0, y: 130, offsetX: 0.5, offsetY: 0.14,
-  scale: 0.85, drift: 0, anchorSide: 'left'
-};
+const blimp = { offsetX: 0.5, offsetY: 0.14, scale: 0.85, drift: 0 };
 
 let distance = 0;
 let startTime = performance.now();
@@ -275,7 +272,12 @@ const AudioEngine = (() => {
       // «хрип»: подрезаем всё ниже 28 Гц до клипа, а не после.
       const rumble = ctx.createBiquadFilter();
       rumble.type = 'highpass'; rumble.frequency.value = 28; rumble.Q.value = 0.7;
-      master.connect(rumble); rumble.connect(glue); glue.connect(ctx.destination);
+      // А это — обратная сторона: плотный шум хэтов выше 12 кГц AAC на 160k
+      // не тянет и превращает в песок. Срез мягкий, музыке он не слышен,
+      // а «хруст» в эфире уходит.
+      const air = ctx.createBiquadFilter();
+      air.type = 'lowpass'; air.frequency.value = 12000; air.Q.value = 0.6;
+      master.connect(rumble); rumble.connect(glue); glue.connect(air); air.connect(ctx.destination);
 
       // Пелена (подложка и арпеджио) — отдельная шина: её уступает бочке,
       // отсюда берётся кач.
@@ -321,7 +323,7 @@ const AudioEngine = (() => {
       // в эфире нужно знать, что их нельзя убирать как отработавшие. В браузере
       // такого метода нет — и не надо.
       if (ctx.__persistent) {
-        for (const node of [master, rumble, glue, musicGain, musicCut, sfxGain, revSend, revCut]) {
+        for (const node of [master, rumble, glue, air, musicGain, musicCut, sfxGain, revSend, revCut]) {
           ctx.__persistent(node);
         }
       }
@@ -410,12 +412,15 @@ const AudioEngine = (() => {
   // ── ритм-секция ───────────────────────────────────────────────────
   function kick(t0) {
     layer({ t: t0, type: 'sine', f0: 120, f1: 38, slide: 0.09, dur: 0.34, peak: 0.36, attack: 0.004, hold: 0.02 });
-    spray({ t: t0, dur: 0.014, peak: 0.14, filter: 'highpass', ff: 3000 });
+    spray({ t: t0, dur: 0.012, peak: 0.08, filter: 'highpass', ff: 2000 });
   }
 
+  // Хэты — не «тарелка», а лоу-фай шорох: полоса 3–5 кГц вместо открытого
+  // шума с 6 кГц. Открытый верх давал в AAC песок, который на слух читался
+  // как хруст всей музыки.
   function hat(t0, pan, open) {
-    spray({ t: t0, dur: open ? 0.17 : 0.05, peak: open ? 0.17 : 0.14,
-            filter: 'highpass', ff: 6000, pan });
+    spray({ t: t0, dur: open ? 0.17 : 0.05, peak: open ? 0.11 : 0.09,
+            filter: 'bandpass', ff: open ? 4200 : 3600, q: 0.9, pan });
   }
 
   // Боковой канал: пелена коротко уступает бочке — появляется кач.
@@ -1859,7 +1864,6 @@ function update(dt) {
   }
 
   blimp.drift += 0.002;
-  blimp.x += Math.sin(blimp.drift) * 0.05;
 
   if (world.particles.length > MAX_PARTICLES) world.particles.splice(0, world.particles.length - MAX_PARTICLES);
   for (let i = world.particles.length - 1; i >= 0; i--) {
@@ -2225,7 +2229,7 @@ function draw() {
 function drawBlimp() {
   // Медленный ход в пределах верхней середины кадра. Параллакса от камеры
   // больше нет: он уносил вывеску за левый край, в колонку HUD.
-  const px = W * blimp.offsetX + blimp.x + Math.sin(blimp.drift * 0.11) * W * 0.24;
+  const px = W * blimp.offsetX + Math.sin(blimp.drift * 0.11) * W * 0.24;
   const py = H * blimp.offsetY + Math.sin(blimp.drift) * 3;
   ctx.save();
   ctx.translate(px, py);
@@ -3068,7 +3072,6 @@ function drawHud() {
   g.restore();
 
   drawBrainPanel();
-  drawChatPanel();
   drawFilmOverlay();
 }
 
@@ -3196,113 +3199,6 @@ function drawBrainPanel() {
       g.fillText(BRAIN_TAGS[i], x + 8 * k, y + 3 * k);
     }
   }
-  g.restore();
-}
-
-// ================================================================
-// ============ ЧАТ ЭФИРА (кринж) =================================
-// ================================================================
-// Живой чат — половина ощущения стрима. Ники и реплики нарочно абсурдные:
-// «67», «скибиди», «аура» — так тренд читается сразу, а не через подпись.
-const CHAT_LINES = [
-  ['первый', 'первый!'],
-  ['муха_фанат', 'скибиди муха'],
-  ['anon', '67'],
-  ['sigma228', 'аура +100'],
-  ['тут_есть_чат', 'это нейросеть?'],
-  ['мама', 'я в телевизоре'],
-  ['dota2', 'она играет лучше меня'],
-  ['admin', 'не режь'],
-  ['zzz', 'дайте ей донат'],
-  ['brainrot', 'ОНА СИГМА'],
-  ['kto', 'я сюда по рекламе'],
-  ['xXx', 'почему она не моргает'],
-  ['fly_lover', 'муха, ты лучшая'],
-  ['67', '67'],
-  ['reels', 'это монтаж'],
-  ['anon2', 'чат, она живая?'],
-  // Осень 2026: форсбоб, мьюинг, «only in ohio», сахур, «вот такие дела,
-  // собачка» и нейросетевые пародии на телешоу — всё это живёт в чате.
-  ['forcebob', 'я не форсбоб'],
-  ['mewing', 'мьюинг не поможет'],
-  ['ohio', 'only in ohio'],
-  ['собачка', 'вот такие дела'],
-  ['sahur', 'тунг тунг тунг'],
-  ['nolan', 'каппи-аудишн'],
-  ['aura', 'минус 20 ауры'],
-];
-const CHAT_COLORS = ['#9ecbff', '#ffd93d', '#7CFC00', '#ff9ad5', '#c8b6ff'];
-const chat = { items: [], next: 0 };
-
-let chatLayer = null, chatLayerK = 0;
-function chatLayerCanvas(k) {
-  if (chatLayer && chatLayerK === k) return chatLayer;
-  const pw = 290 * k, ph = 190 * k;
-  const cv = document.createElement('canvas');
-  cv.width = Math.ceil(pw); cv.height = Math.ceil(ph);
-  const g = cv.getContext('2d');
-  g.fillStyle = 'rgba(6,10,14,0.5)';
-  g.fillRect(0, 0, pw, ph);
-  g.strokeStyle = 'rgba(255,120,160,0.22)';
-  g.lineWidth = Math.max(1, k);
-  g.strokeRect(0.5, 0.5, pw - 1, ph - 1);
-  g.textAlign = 'left';
-  g.textBaseline = 'alphabetic';
-  g.font = `bold ${Math.round(11 * k)}px 'Courier New', monospace`;
-  g.fillStyle = 'rgba(255,140,170,0.85)';
-  g.fillText('ЧАТ', 10 * k, 18 * k);
-  g.strokeStyle = 'rgba(255,120,160,0.16)';
-  g.beginPath(); g.moveTo(10 * k, 26 * k); g.lineTo(pw - 10 * k, 26 * k); g.stroke();
-  chatLayer = cv;
-  chatLayerK = k;
-  return cv;
-}
-
-function drawChatPanel() {
-  const g = ctx;
-  const k = W / 1280;
-  const pw = 290 * k, ph = 190 * k;
-  const px = W - pw - 18 * k, py = 250 * k;
-  const t = now();
-
-  // Новая реплика раз в 2.2–3.6 секунды: медленно, как в настоящем чате.
-  if (t >= chat.next) {
-    chat.next = t + 2200 + Math.random() * 1400;
-    const line = CHAT_LINES[Math.floor(Math.random() * CHAT_LINES.length)];
-    chat.items.push({ who: line[0], what: line[1], t });
-    if (chat.items.length > 6) chat.items.shift();
-  }
-
-  g.save();
-  g.drawImage(chatLayerCanvas(k), px, py);
-
-  g.textAlign = 'left';
-  g.textBaseline = 'alphabetic';
-  g.font = `bold ${Math.round(10 * k)}px 'Courier New', monospace`;
-  // Точка «в эфире» и число зрителей — нарочно смешное.
-  g.fillStyle = 'rgba(124,252,0,0.9)';
-  g.beginPath(); g.arc(px + 44 * k, py + 14 * k, 2.6 * k, 0, Math.PI * 2); g.fill();
-  g.fillStyle = 'rgba(200,230,210,0.55)';
-  const viewers = 12 + Math.round(Math.sin(t * 0.0002) * 3);
-  g.fillText(viewers + ' смотрят', px + 52 * k, py + 18 * k);
-
-  const first = Math.max(0, chat.items.length - 5);
-  for (let i = first; i < chat.items.length; i++) {
-    const m = chat.items[i];
-    const y = py + (42 + (i - first) * 26) * k;
-    const age = (t - m.t) / 1000;
-    const a = Math.min(1, age / 0.2) * Math.max(0, 1 - (age - 14) / 6);
-    if (a <= 0.02) continue;
-    const x = px + 10 * k;
-    g.globalAlpha = a * 0.85;
-    g.fillStyle = CHAT_COLORS[m.who.length % CHAT_COLORS.length];
-    g.fillText(m.who + ':', x, y);
-    // Шаг моноширинного шрифта считаем, а не меряем: measureText пять раз
-    // за кадр — это лишние обращения к шрифту на ровном месте.
-    g.fillStyle = 'rgba(235,242,250,0.92)';
-    g.fillText(m.what, x + (m.who.length + 2) * 6 * k, y);
-  }
-  g.globalAlpha = 1;
   g.restore();
 }
 
