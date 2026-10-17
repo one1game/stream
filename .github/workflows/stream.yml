@@ -12,9 +12,9 @@ on:
         required: false
         default: "normal"
       video:
-        description: "Что показывать: newvideo.html — улица (живёт по музыке радио), muxa.html — авто-платформер «стрим мухи» со своим звуком, game_video.html — генератор игр"
+        description: "Что показывать: muxa.html — авто-платформер «стрим мухи» со своим звуком, newvideo.html — улица (живёт по музыке радио), game_video.html — генератор игр"
         required: false
-        default: "newvideo.html"
+        default: "muxa.html"
 
 permissions:
   contents: read
