@@ -131,9 +131,13 @@ const player = {
   invulnBuffUntil: 0, infiniteAmmoUntil: 0
 };
 
+// Дирижабль — вывеска канала, и он должен читаться всегда, а не проплывать
+// раз в минуту где-то за краем. Держим его в верхней середине неба, выше
+// панелей мозга и чата и правее колонки HUD: он медленно ходит туда-обратно
+// и не прячется ни за одним элементом.
 const blimp = {
-  x: 0, y: 130, offsetX: 0.28, offsetY: 0.15,
-  scale: 0.75, drift: 0, anchorSide: 'left'
+  x: 0, y: 130, offsetX: 0.5, offsetY: 0.14,
+  scale: 0.85, drift: 0, anchorSide: 'left'
 };
 
 let distance = 0;
@@ -249,8 +253,10 @@ const AudioEngine = (() => {
     // Мягкий клип мастера: до 0.7 почти прямая, выше — плавно в потолок.
     // Кривая без «подъёма»: уровень задаёт громкость мастера, а не кривая.
     glue: curve(x => Math.tanh(x)),
-    grit: curve(x => Math.round(x * 6) / 6),                 // ступени — грязь урона
-    bite: curve(x => Math.tanh(x * 5) / Math.tanh(5)),       // жёстче — для смерти
+    // Раньше здесь были СТУПЕНИ (Math.round) — они и давали хрип на уроне.
+    // Теперь просто тёплая сатурация: та же плотность, но без песка.
+    grit: curve(x => Math.tanh(x * 2.5) / Math.tanh(2.5)),
+    bite: curve(x => Math.tanh(x * 4) / Math.tanh(4)),       // жёстче — для смерти
   };
 
   function init() {
@@ -265,7 +271,11 @@ const AudioEngine = (() => {
       // только самых громких ударов, не размазывая их.
       const glue = ctx.createWaveShaper(); glue.curve = shapes.glue;
       master = ctx.createGain(); master.gain.value = 0.1;
-      master.connect(glue); glue.connect(ctx.destination);
+      // Сабвуферный низ (пинок уходит к 38 Гц) на кодировщике превращался в
+      // «хрип»: подрезаем всё ниже 28 Гц до клипа, а не после.
+      const rumble = ctx.createBiquadFilter();
+      rumble.type = 'highpass'; rumble.frequency.value = 28; rumble.Q.value = 0.7;
+      master.connect(rumble); rumble.connect(glue); glue.connect(ctx.destination);
 
       // Пелена (подложка и арпеджио) — отдельная шина: её уступает бочке,
       // отсюда берётся кач.
@@ -278,7 +288,7 @@ const AudioEngine = (() => {
 
       // Пространство: четыре отражения подряд, без обратной связи — петлю
       // офлайн-движок не переживёт, а так его понимают и браузер, и эфир.
-      revSend = ctx.createGain(); revSend.gain.value = 0.5;
+      revSend = ctx.createGain(); revSend.gain.value = 0.35;
       const revCut = ctx.createBiquadFilter();
       revCut.type = 'lowpass'; revCut.frequency.value = 3000;
       revSend.connect(revCut); revCut.connect(master);
@@ -311,7 +321,7 @@ const AudioEngine = (() => {
       // в эфире нужно знать, что их нельзя убирать как отработавшие. В браузере
       // такого метода нет — и не надо.
       if (ctx.__persistent) {
-        for (const node of [master, glue, musicGain, musicCut, sfxGain, revSend, revCut]) {
+        for (const node of [master, rumble, glue, musicGain, musicCut, sfxGain, revSend, revCut]) {
           ctx.__persistent(node);
         }
       }
@@ -377,7 +387,11 @@ const AudioEngine = (() => {
       src.connect(f); tail = f;
     }
     const g = ctx.createGain();
-    g.gain.setValueAtTime(Math.max(0.0002, o.peak || 0.15), t0);
+    const peak = Math.max(0.0002, o.peak || 0.15);
+    // Короткая атака вместо ступеньки: мгновенный старт шума давал щелчок,
+    // который в наушниках читался как треск, особенно на хэтах.
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(peak, t0 + (o.attack || 0.0015));
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
     tail.connect(g);
     let out = g;
@@ -400,8 +414,8 @@ const AudioEngine = (() => {
   }
 
   function hat(t0, pan, open) {
-    spray({ t: t0, dur: open ? 0.17 : 0.05, peak: open ? 0.2 : 0.16,
-            filter: 'highpass', ff: 7000, pan });
+    spray({ t: t0, dur: open ? 0.17 : 0.05, peak: open ? 0.17 : 0.14,
+            filter: 'highpass', ff: 6000, pan });
   }
 
   // Боковой канал: пелена коротко уступает бочке — появляется кач.
@@ -2209,11 +2223,12 @@ function draw() {
 }
 
 function drawBlimp() {
-  const px = W * blimp.offsetX + blimp.x - cameraX * 0.05;
-  const wrapX = ((px % (W * 1.5)) + W * 1.5) % (W * 1.5) - W * 0.25;
+  // Медленный ход в пределах верхней середины кадра. Параллакса от камеры
+  // больше нет: он уносил вывеску за левый край, в колонку HUD.
+  const px = W * blimp.offsetX + blimp.x + Math.sin(blimp.drift * 0.11) * W * 0.24;
   const py = H * blimp.offsetY + Math.sin(blimp.drift) * 3;
   ctx.save();
-  ctx.translate(wrapX, py);
+  ctx.translate(px, py);
   ctx.scale(blimp.scale, blimp.scale);
   ctx.rotate(Math.sin(blimp.drift * 0.7) * 0.03);
   // Тень раньше рисовалась внутри scale()/rotate() корпуса и уезжала посреди
@@ -2231,8 +2246,9 @@ function drawBlimp() {
   ctx.font = 'bold 15px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(110,35,25,0.9)';
-  ctx.fillText('ONE1GAME', 0, -15);
+  ctx.fillStyle = 'rgba(110,35,25,0.95)';
+  ctx.font = 'bold 15px monospace';
+  ctx.fillText('ONE1GAME.ORG', 0, -15);
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#c8b8a0';
   ctx.beginPath(); ctx.ellipse(75, 0, 15, 22, 0, 0, Math.PI * 2); ctx.fill();
@@ -2512,10 +2528,11 @@ function updateStreamer(dt) {
 
   // Реакции на события игры
   if (player.hp < S.lastHp - 5) {
-    // Получил урон — паника
+    // Получил урон — паника. Реплики в духе нынешнего интернета: «67»,
+    // «аура», «это монтаж» — так кринж выглядит намеренным, а не случайным.
     S.panic = 1;
     S.mouthOpen = 1;
-    S.reactionText = ['ОЙ!', 'АЙ!', 'БОЛЬНО!', 'НЕЕЕТ!'][Math.floor(Math.random() * 4)];
+    S.reactionText = ['МИНУС 20 АУРЫ', 'ЭТО МОНТАЖ!', 'НЕ РЕЖЬ!', 'ТОЛЬКО В ОГАЙО', 'ПОЧЕМУ Я'][Math.floor(Math.random() * 5)];
     S.reactionTimer = 900;
   }
   S.lastHp = player.hp;
@@ -2524,7 +2541,7 @@ function updateStreamer(dt) {
     S.panic = 1;
     S.excitement = 0.3;
     S.mouthOpen = 1;
-    S.reactionText = ['БЛИН!', 'ЧЁ ЗА...', 'ОПЯТЬ!', 'Я ЖЕ МОГУ!'][Math.floor(Math.random() * 4)];
+    S.reactionText = ['67', 'ВОТ ТАКИЕ ДЕЛА', 'Я ЖЕ СИГМА', 'МАМА, Я В ЭФИРЕ', 'ЭТО НЕ Я'][Math.floor(Math.random() * 5)];
     S.reactionTimer = 1500;
   }
   S.lastDeaths = Brain.deaths;
@@ -2532,7 +2549,7 @@ function updateStreamer(dt) {
   if (player.combo > S.lastCombo && player.combo >= 3) {
     S.excitement = 1;
     S.mouthOpen = 1;
-    S.reactionText = ['КОМБО x' + player.combo + '!', 'ЖАРА!', 'ИДЁТ!', 'ПОШЛА ЖАРА!'][Math.floor(Math.random() * 4)];
+    S.reactionText = ['АУРА +100', 'Я СИГМА', 'ЧАТ, ВИДЕЛИ?', '67', 'КОМБО x' + player.combo][Math.floor(Math.random() * 5)];
     S.reactionTimer = 900;
   }
   S.lastCombo = player.combo;
@@ -2541,7 +2558,7 @@ function updateStreamer(dt) {
   if (Brain.totalKills > (S._lastKills || 0)) {
     S.excitement = Math.min(1, S.excitement + 0.4);
     if (Math.random() < 0.3) {
-      S.reactionText = ['+1!', 'ИЗИ!', 'ГОТОВ!', 'GG!'][Math.floor(Math.random() * 4)];
+      S.reactionText = ['+1 АУРА', 'ИЗИ', 'GG', 'СКИБИДИ', 'НЕ РЕЖЬ'][Math.floor(Math.random() * 5)];
       S.reactionTimer = 500;
     }
   }
@@ -3051,6 +3068,7 @@ function drawHud() {
   g.restore();
 
   drawBrainPanel();
+  drawChatPanel();
   drawFilmOverlay();
 }
 
@@ -3178,6 +3196,113 @@ function drawBrainPanel() {
       g.fillText(BRAIN_TAGS[i], x + 8 * k, y + 3 * k);
     }
   }
+  g.restore();
+}
+
+// ================================================================
+// ============ ЧАТ ЭФИРА (кринж) =================================
+// ================================================================
+// Живой чат — половина ощущения стрима. Ники и реплики нарочно абсурдные:
+// «67», «скибиди», «аура» — так тренд читается сразу, а не через подпись.
+const CHAT_LINES = [
+  ['первый', 'первый!'],
+  ['муха_фанат', 'скибиди муха'],
+  ['anon', '67'],
+  ['sigma228', 'аура +100'],
+  ['тут_есть_чат', 'это нейросеть?'],
+  ['мама', 'я в телевизоре'],
+  ['dota2', 'она играет лучше меня'],
+  ['admin', 'не режь'],
+  ['zzz', 'дайте ей донат'],
+  ['brainrot', 'ОНА СИГМА'],
+  ['kto', 'я сюда по рекламе'],
+  ['xXx', 'почему она не моргает'],
+  ['fly_lover', 'муха, ты лучшая'],
+  ['67', '67'],
+  ['reels', 'это монтаж'],
+  ['anon2', 'чат, она живая?'],
+  // Осень 2026: форсбоб, мьюинг, «only in ohio», сахур, «вот такие дела,
+  // собачка» и нейросетевые пародии на телешоу — всё это живёт в чате.
+  ['forcebob', 'я не форсбоб'],
+  ['mewing', 'мьюинг не поможет'],
+  ['ohio', 'only in ohio'],
+  ['собачка', 'вот такие дела'],
+  ['sahur', 'тунг тунг тунг'],
+  ['nolan', 'каппи-аудишн'],
+  ['aura', 'минус 20 ауры'],
+];
+const CHAT_COLORS = ['#9ecbff', '#ffd93d', '#7CFC00', '#ff9ad5', '#c8b6ff'];
+const chat = { items: [], next: 0 };
+
+let chatLayer = null, chatLayerK = 0;
+function chatLayerCanvas(k) {
+  if (chatLayer && chatLayerK === k) return chatLayer;
+  const pw = 290 * k, ph = 190 * k;
+  const cv = document.createElement('canvas');
+  cv.width = Math.ceil(pw); cv.height = Math.ceil(ph);
+  const g = cv.getContext('2d');
+  g.fillStyle = 'rgba(6,10,14,0.5)';
+  g.fillRect(0, 0, pw, ph);
+  g.strokeStyle = 'rgba(255,120,160,0.22)';
+  g.lineWidth = Math.max(1, k);
+  g.strokeRect(0.5, 0.5, pw - 1, ph - 1);
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  g.font = `bold ${Math.round(11 * k)}px 'Courier New', monospace`;
+  g.fillStyle = 'rgba(255,140,170,0.85)';
+  g.fillText('ЧАТ', 10 * k, 18 * k);
+  g.strokeStyle = 'rgba(255,120,160,0.16)';
+  g.beginPath(); g.moveTo(10 * k, 26 * k); g.lineTo(pw - 10 * k, 26 * k); g.stroke();
+  chatLayer = cv;
+  chatLayerK = k;
+  return cv;
+}
+
+function drawChatPanel() {
+  const g = ctx;
+  const k = W / 1280;
+  const pw = 290 * k, ph = 190 * k;
+  const px = W - pw - 18 * k, py = 250 * k;
+  const t = now();
+
+  // Новая реплика раз в 2.2–3.6 секунды: медленно, как в настоящем чате.
+  if (t >= chat.next) {
+    chat.next = t + 2200 + Math.random() * 1400;
+    const line = CHAT_LINES[Math.floor(Math.random() * CHAT_LINES.length)];
+    chat.items.push({ who: line[0], what: line[1], t });
+    if (chat.items.length > 6) chat.items.shift();
+  }
+
+  g.save();
+  g.drawImage(chatLayerCanvas(k), px, py);
+
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  g.font = `bold ${Math.round(10 * k)}px 'Courier New', monospace`;
+  // Точка «в эфире» и число зрителей — нарочно смешное.
+  g.fillStyle = 'rgba(124,252,0,0.9)';
+  g.beginPath(); g.arc(px + 44 * k, py + 14 * k, 2.6 * k, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'rgba(200,230,210,0.55)';
+  const viewers = 12 + Math.round(Math.sin(t * 0.0002) * 3);
+  g.fillText(viewers + ' смотрят', px + 52 * k, py + 18 * k);
+
+  const first = Math.max(0, chat.items.length - 5);
+  for (let i = first; i < chat.items.length; i++) {
+    const m = chat.items[i];
+    const y = py + (42 + (i - first) * 26) * k;
+    const age = (t - m.t) / 1000;
+    const a = Math.min(1, age / 0.2) * Math.max(0, 1 - (age - 14) / 6);
+    if (a <= 0.02) continue;
+    const x = px + 10 * k;
+    g.globalAlpha = a * 0.85;
+    g.fillStyle = CHAT_COLORS[m.who.length % CHAT_COLORS.length];
+    g.fillText(m.who + ':', x, y);
+    // Шаг моноширинного шрифта считаем, а не меряем: measureText пять раз
+    // за кадр — это лишние обращения к шрифту на ровном месте.
+    g.fillStyle = 'rgba(235,242,250,0.92)';
+    g.fillText(m.what, x + (m.who.length + 2) * 6 * k, y);
+  }
+  g.globalAlpha = 1;
   g.restore();
 }
 
