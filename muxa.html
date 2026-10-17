@@ -139,7 +139,13 @@ const blimp = {
 let distance = 0;
 let startTime = performance.now();
 let finished = false;
+let finishAt = 0;            // когда показали финальную плашку
+let runIndex = 1;            // какой по счёту забег идёт
 const TOTAL_SECONDS = 5 * 60 * 60;
+// Эфир может идти дольше пяти часов, поэтому финал не глушит игру навсегда:
+// плашка висит полторы минуты, и забег начинается заново. Мозг, опыт и мир
+// остаются — это тот же «я», просто новый круг.
+const FINALE_MS = 90000;
 
 // ================================================================
 // ============ МОЗГ ==============================================
@@ -1880,7 +1886,16 @@ function update(dt) {
   }
 
   hud.progress = Math.min(100, (elapsed / TOTAL_SECONDS) * 100);
-  if (elapsed >= TOTAL_SECONDS) finished = true;
+  if (elapsed >= TOTAL_SECONDS && !finished) { finished = true; finishAt = now(); }
+}
+
+function restartRun() {
+  finished = false;
+  finishAt = 0;
+  runIndex++;
+  startTime = now();
+  hud.progress = 0;
+  hud.time = '0:00';
 }
 
 function spawnParticles(x, y, color, count) {
@@ -2186,9 +2201,10 @@ function draw() {
     ctx.fillText('ПРОХОЖДЕНИЕ ЗАВЕРШЕНО!', W / 2, H / 2 - 70);
     ctx.shadowBlur = 0;
     ctx.fillStyle = '#fff'; ctx.font = '24px monospace';
-    ctx.fillText('5 часов непрерывной игры пройдено', W / 2, H / 2 + 10);
+    ctx.fillText('5 часов непрерывной игры пройдено · забег ' + runIndex, W / 2, H / 2 + 10);
     ctx.fillText('Финальный навык: ' + Brain.skill.name + ' (' + Brain.skill.level + ')', W / 2, H / 2 + 50);
     ctx.fillText('Убито: ' + player.kills + ' | Смертей: ' + Brain.deaths + ' | Комбо: x' + Brain.stats.longestCombo, W / 2, H / 2 + 90);
+    ctx.fillText('дальше — новый круг', W / 2, H / 2 + 130);
   }
 }
 
@@ -3300,6 +3316,8 @@ let stepAccum = 0;
 
 function loop(n) {
   try {
+    // Финал отыграл — начинаем новый забег, не останавливая эфир.
+    if (finished && n - finishAt > FINALE_MS) restartRun();
     const dt = Math.min(100, n - lastTime);
     lastTime = n;
     stepAccum += dt;
